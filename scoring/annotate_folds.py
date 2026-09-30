@@ -80,7 +80,17 @@ def annotate(cif, binder_len, centers):
     for c in sorted(set(chain)):
         if int((chain == c).sum()) == binder_len:
             binder_ch = c; break
-    is_binder = (chain == binder_ch) if binder_ch is not None else np.ones(L, bool)
+    if binder_ch is None:
+        # Previously this fell back to `np.ones(L, bool)`, i.e. "every residue is binder", which made
+        # _count score EVERY bond in the dimer as binder-scoped and silently inflated *_ph_bonds;
+        # center_gated_bonds went nan and microstate_match scored 0.0 against a `None` chain key.
+        # A fold whose binder cannot be identified has no meaningful read-out, so fail loudly --
+        # both callers (design_ph.py, the --aggregate driver) already catch and skip.
+        raise ValueError(
+            f"no chain has binder_len={binder_len} residues in {cif} "
+            f"(chain residue counts: {{{', '.join(f'{c!r}: {int((chain == c).sum())}' for c in sorted(set(chain)))}}}) "
+            "-- pass the binder_len that matches this fold")
+    is_binder = (chain == binder_ch)
 
     hb = _edges(np.asarray(ni["hbond_donates_to"]).squeeze(0)) | _edges(np.asarray(ni["hbond_accepts_from"]).squeeze(0))
     sb = _edges(np.asarray(ni["salt_partners"]).squeeze(0))

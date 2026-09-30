@@ -31,6 +31,22 @@ PKG = HERE.parent if HERE.name == "labeller" else HERE
 if not os.environ.get("HBPLUS_PATH"):
     raise SystemExit("set HBPLUS_PATH=/path/to/hbplus — the protonation labeller reads H-bond geometry from HBPLUS")
 
+# --- label at the OPERATING POINT the packaged model was trained at ---------------------------------
+# The P-vs-neutral cut is part of the labels: transforms/ev6/weights/thresholds.json defaults to
+# his prob_thr=0.40, but the packaged v6 checkpoint records his_prob_thr=0.3 in its train_cfg. Since this
+# example exists to show "the exact labels the Potts model is trained on", it must use the checkpoint's
+# point, not the JSON default — otherwise the His labels shown here are not the ones the model saw.
+# The design engine does this automatically when it loads a checkpoint; here there is no model forward,
+# so read the point off the checkpoint directly. An explicit EV6_HIS_PROB_THR still wins.
+_CKPT = PKG / "checkpoints" / "potts_v6_afdb_edge_his0.3_acid0.06" / "epoch-0125.ckpt"
+if _CKPT.exists():
+    import torch
+    from mpnn.transforms import extended_vocab_v6 as _v6
+    _tc = torch.load(_CKPT, map_location="cpu", weights_only=False).get("train_cfg") or {}
+    _v6.set_checkpoint_operating_point(_tc.get("his_prob_thr"), _tc.get("acid_prob_thr"))
+    print(f"labelling at the checkpoint's operating point: "
+          f"his/acid prob_thr = {_v6._effective_prob_thr()}  (thresholds.json default is his 0.40)")
+
 # any PDB/CIF works; here the shipped PD-L1 seed binder (its binder chain + PD-L1 target)
 META = json.loads((PKG / "inference" / "examples" / "example_meta.json").read_text())
 PDB = PKG / "inference" / "examples" / META["pdb"]

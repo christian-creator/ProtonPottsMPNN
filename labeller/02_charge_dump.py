@@ -23,9 +23,9 @@ Kernels the sweep will consider:
     debye      q * exp(-d/lam) / d       screened Coulomb -- the physically right one for water+salt,
                                          and the one ev4 never tried
 
-Output: sandbox/ev5/charge_ctx.parquet  (one row per (titratable atom, charged neighbour) pair)
+Output: labeller/data/charge_ctx.parquet  (one row per (titratable atom, charged neighbour) pair)
 """
-import gc, gzip, sys, warnings
+import gc, gzip, os, sys, warnings
 gc.disable()
 warnings.filterwarnings("ignore")
 

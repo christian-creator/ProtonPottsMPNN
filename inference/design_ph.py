@@ -20,7 +20,12 @@ import json
 from pathlib import Path
 
 os.environ.pop("DEBUG", None)                     # a stray non-boolean DEBUG in your shell breaks environs/foundry
-os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")  # CPU is plenty for one small binder
+# CPU is plenty for the DESIGN stage (one small binder). But RF3 folding at the end of this script needs
+# a visible CUDA device -- `fold_rf3.rf3_available()` requires torch.cuda.is_available() -- so hiding the
+# GPU unconditionally (as this used to) silently forced the no-RF3 branch even with RF3_CKPT set on a GPU
+# node. Only hide the GPU when there is no fold to run.
+if not os.environ.get("RF3_CKPT"):
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
 
 import numpy as np
 import pandas as pd

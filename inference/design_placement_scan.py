@@ -50,12 +50,31 @@ def plot_design_placement(engine, atom_array, binder_chain, fig=None):
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
-    cls = classify_binder(atom_array, binder_chain)
     ctx = engine._build_context(atom_array, binder_chain)
     t2i = ctx.encoding.token_to_idx
     region = ctx.chA_free_idx
     res_ids = np.array([int(ctx.token_aa.res_id[int(p)]) for p in region.tolist()])
-    pos_cls = np.array([cls.get(int(r), "surface") for r in res_ids])
+
+    # Structural class from THE ENGINE'S OWN region masks (ctx.region_masks), so the class track under
+    # the scan is the same partition `placement_region=["core"|"interface"|"surface"]` actually selects.
+    # The local `classify_binder` below disagrees with the engine on both criteria -- it normalises SASA
+    # by the most exposed residue in THIS binder rather than by the residue type's Tien et al. maximum,
+    # and uses an 8 A interface cutoff against the engine's 6 A -- so colouring the figure with it could
+    # label a residue "core" that the engine would never draw from the core region. Kept as the
+    # standalone fallback for when the engine's SASA classification failed (it is fail-soft and can
+    # return empty masks).
+    _rm = getattr(ctx, "region_masks", None) or {}
+    if any(m is not None and bool(m.any()) for m in _rm.values()):
+        def _cls_at(p):                       # precedence interface > core > surface, as before
+            for name in ("interface", "core"):
+                m = _rm.get(name)
+                if m is not None and bool(m[int(p)]):
+                    return name
+            return "surface"
+        pos_cls = np.array([_cls_at(p) for p in region.tolist()])
+    else:
+        cls = classify_binder(atom_array, binder_chain)
+        pos_cls = np.array([cls.get(int(r), "surface") for r in res_ids])
 
     seq = ctx.S_native.clone()
     with torch.no_grad():

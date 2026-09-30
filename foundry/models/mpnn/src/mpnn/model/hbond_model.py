@@ -22,7 +22,7 @@ from mpnn.model.pottsmpnn import PottsMPNN
 from mpnn.model.layers.graph_embeddings import PottsProteinFeatures
 from mpnn.hbond_head import (
     HBondHead, build_edge_features, reverse_edge_index, HBOND, DONOR, ACCEPTOR, SALTBRIDGE,
-    FAMILY_BY_IDX, NEUTRAL_IDX, CHARGED_IDX, AMBIGUOUS_TOKENS,
+    AMBIGUOUS_TOKENS,
 )
 
 

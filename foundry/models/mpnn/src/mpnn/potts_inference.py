@@ -70,6 +70,19 @@ def load_model(
         ckpt_vocab = None
     vocab_name = extended_vocab if isinstance(extended_vocab, str) else ckpt_vocab
 
+    # Reproduce the checkpoint's LABEL OPERATING POINT (train_cfg.{his,acid}_prob_thr) in the live EV6
+    # labeller, so prepare_potts_input builds S at the cut the model was trained at rather than the
+    # thresholds.json default. An explicit EV6_*_PROB_THR env var still wins. See
+    # extended_vocab_v6.set_checkpoint_operating_point.
+    try:
+        _tc = ckpt.get("train_cfg") or {}
+        _his_thr, _acid_thr = _tc.get("his_prob_thr"), _tc.get("acid_prob_thr")
+    except Exception:
+        _his_thr = _acid_thr = None
+    if _his_thr is not None or _acid_thr is not None:
+        from mpnn.transforms import extended_vocab_v6
+        extended_vocab_v6.set_checkpoint_operating_point(_his_thr, _acid_thr)
+
     if vocab_name:
         from mpnn.transforms.extended_vocab import get_vocab
         feats = PottsProteinFeatures(token_encoding=get_vocab(vocab_name)["token_encoding"])
@@ -278,10 +291,17 @@ def get_masks(
     ``valid_aa_mask``  — True for amino acid tokens that may be proposed
                          (excludes UNK and other special tokens).
     """
-    free_mask = (
-        batch["network_input"]["input_features"]["designed_residue_mask"]
-        .squeeze(0).bool()
-    )
+    ni = batch["network_input"]["input_features"]
+    designed = ni.get("designed_residue_mask")
+    if designed is None:
+        # No fixed_chains / designed_chains / *_residues were given, so the featuriser left the
+        # annotation off entirely (utils/inference.py::_annotate_design_scope returns early) and relies
+        # on the model's implicit "design every residue". Mirror that here instead of raising an
+        # AttributeError on None -- which is what the module's own __main__ demo below used to do.
+        free_mask = torch.ones(int(ni["S"].shape[-1]), dtype=torch.bool,
+                               device=next(model.parameters()).device)
+    else:
+        free_mask = designed.squeeze(0).bool()
     V = model.potts_vocab_size
     device = next(model.parameters()).device
     valid_aa_mask = torch.ones(V, dtype=torch.bool, device=device)
@@ -329,16 +349,28 @@ def run_potts_optimize(
 # Utility
 # ---------------------------------------------------------------------------
 
-def decode_sequences(seq_int: torch.Tensor) -> list[str]:
-    """Convert integer-encoded [N, L] tensor to one-letter amino-acid strings."""
+def decode_sequences(seq_int: torch.Tensor, model: PottsMPNN | None = None) -> list[str]:
+    """Convert integer-encoded [N, L] tensor to one-letter amino-acid strings.
+
+    Pass ``model`` whenever the sequence was built in an EXTENDED vocabulary: the token indices of the
+    v6 (30-token) and v3/v4 (32-token) sets differ from the base 21-token map, so decoding a v6
+    sequence against the default encoding silently renders the wrong residues, and every protonation
+    microstate ("ASP-P", "HIS-S", …) renders as the unknown-AA letter because ``DICT_THREE_TO_ONE`` has
+    no entry for it. With ``model`` the model's own encoding is used and each microstate is folded to
+    its canonical parent first. ``model=None`` keeps the historical base-vocabulary behaviour.
+    """
     from atomworks.constants import DICT_THREE_TO_ONE, UNKNOWN_AA
-    idx_to_token = MPNN_TOKEN_ENCODING.idx_to_token
+    idx_to_token = (
+        model.graph_featurization_module.TOKEN_ENCODING.idx_to_token
+        if model is not None else MPNN_TOKEN_ENCODING.idx_to_token
+    )
+    unk = DICT_THREE_TO_ONE[UNKNOWN_AA]
     result = []
     for row in seq_int.detach().cpu().numpy():
-        three = [idx_to_token[int(i)] for i in row]
-        result.append("".join(
-            DICT_THREE_TO_ONE.get(r, DICT_THREE_TO_ONE[UNKNOWN_AA]) for r in three
-        ))
+        three = [str(idx_to_token[int(i)]) for i in row]
+        # "ASP-P"/"ASP-D"/"HIS-S"/… -> the canonical parent before the 1-letter lookup.
+        parents = [t.split("-", 1)[0] if "-" in t else t for t in three]
+        result.append("".join(DICT_THREE_TO_ONE.get(r, unk) for r in parents))
     return result
 
 
@@ -370,7 +402,7 @@ if __name__ == "__main__":
 
     seq_opt, energies = run_potts_optimize(potts_out, free_mask, valid_aa_mask)
 
-    sequences = decode_sequences(seq_opt)
+    sequences = decode_sequences(seq_opt, model)
     print(f"\n{'Rank':>4}  {'Energy':>14}  Sequence")
     print("-" * 80)
     for rank, (seq, e) in enumerate(zip(sequences, energies.tolist()), 1):

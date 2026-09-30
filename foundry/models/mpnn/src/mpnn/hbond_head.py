@@ -46,25 +46,19 @@ CHANNELS = ("hbond", "donor", "acceptor", "saltbridge")
 AMBIGUOUS_TOKENS = ("HIS-A", "ASP-A", "GLU-A")
 
 # ── Titratable protonation-switch mapping ────────────────────────────────────────────────────────
-# For each titratable family: the neutral<->charged microstate switch used to test whether flipping a
-# residue's protonation turns a predicted bond into a like-charge clash. HIS neutral = {HID, HIE};
-# HIS charged = HIS-P (+1). ASP/GLU neutral = *-P (0); charged = *-D (-1). HIS-D (imidazolate, -1) is
-# intentionally omitted — it is never introduced in this project. The formal CHARGES themselves live
-# in ``BOND_CHEMISTRY`` (hbond_model.py), the single chemistry source; this table only maps the swap.
-_NAME_TO_IDX = {str(t): i for i, t in enumerate(POTTS_MPNN_TOKEN_ENCODING.idx_to_token)}
-TITRATABLE_SWITCH = {
-    "HIS": {"charged": "HIS-P", "neutral": ("HID", "HIE", "HIS")},
-    "ASP": {"charged": "ASP-D", "neutral": ("ASP-P", "ASP")},
-    "GLU": {"charged": "GLU-D", "neutral": ("GLU-P", "GLU")},
-}
-# token idx -> family, over every (non-ambiguous) microstate of a titratable residue.
-_FAMILY_TOKENS = {"HIS": ("HID", "HIE", "HIS", "HIS-P"),
-                  "ASP": ("ASP", "ASP-P", "ASP-D"),
-                  "GLU": ("GLU", "GLU-P", "GLU-D")}
-FAMILY_BY_IDX = {_NAME_TO_IDX[t]: fam for fam, toks in _FAMILY_TOKENS.items()
-                 for t in toks if t in _NAME_TO_IDX}
-NEUTRAL_IDX = {fam: _NAME_TO_IDX[sw["neutral"][0]] for fam, sw in TITRATABLE_SWITCH.items()}
-CHARGED_IDX = {fam: _NAME_TO_IDX[sw["charged"]] for fam, sw in TITRATABLE_SWITCH.items()}
+# The per-family neutral<->charged microstate indices used to test whether flipping a residue's
+# protonation turns a predicted bond into a like-charge clash are derived FROM THE MODEL'S OWN VOCAB,
+# inside ``HBondModel.protonation_switch_bonds`` (model/hbond_model.py) — the vocab's
+# aa_protonated / aa_deprotonated maps give the two microstates and ``BOND_CHEMISTRY`` charge
+# disambiguates charged from neutral.
+#
+# There used to be module-level ``TITRATABLE_SWITCH`` / ``FAMILY_BY_IDX`` / ``NEUTRAL_IDX`` /
+# ``CHARGED_IDX`` globals here, built at IMPORT time from the 32-token POTTS_MPNN_TOKEN_ENCODING and
+# listing neutral His as ("HID","HIE","HIS") with no HIS-S. They were imported by hbond_model.py and
+# never read (the function shadows them with correct per-vocab locals), but under a v6 model every
+# index in them pointed at the wrong token — two of the 32-token indices don't even exist in the
+# 30-token set. Removed rather than made vocab-aware: the vocabulary is not known at import time, so
+# there is no correct value for a module-level constant to hold.
 
 
 class HBondHead(nn.Module):

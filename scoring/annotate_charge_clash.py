@@ -48,7 +48,13 @@ SALT_DIST = 5.0                                       # opposite-sign salt-bridg
 
 
 def charge_clash(cif, binder_len, centers):
-    """Mean over the design's pinned centres of (# same-sign charged residues within 4 A, both chains)."""
+    """Mean over the design's pinned centres of (# same-sign charged residues within 4 A, both chains).
+
+    Returns ``(clash, salt_bridge, n_centers_scored)``. When no chain's CA count matches
+    ``binder_len`` the binder cannot be identified and it returns ``(nan, nan, 0)`` -- a THREE-tuple,
+    like every other exit, because all callers unpack three
+    (``annotate_charge_clash.py`` __main__, ``scoring/score_example.py``, ``inference/design_ph.py``).
+    """
     import biotite.structure as struc
     import biotite.structure.io.pdbx as pdbx
     aa = pdbx.get_structure(pdbx.CIFFile.read(cif), model=1)
@@ -61,7 +67,7 @@ def charge_clash(cif, binder_len, centers):
         if int((is_ca & (chain == c)).sum()) == binder_len:
             binder_ch = c; break
     if binder_ch is None:
-        return np.nan, 0
+        return np.nan, np.nan, 0
     cell = struc.CellList(aa, cell_size=SALT_DIST)
     clash, salt = [], []
     for rid, ptype in centers:

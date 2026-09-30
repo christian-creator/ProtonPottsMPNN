@@ -44,9 +44,12 @@ FLAML stack, jupyter, propka), verifies `import mpnn` resolves inside this folde
 a Jupyter kernel `ProtonPottsMPNN (.venv)`. Scripts just `import mpnn`; there are no `sys.path` hacks.
 
 - **Python 3.12** is required (`mpnn`/`foundry` pin `>=3.12,<3.13`).
-- **HBPLUS** is an external C binary (not pip-installable) used by the **labeller** and the **fold scoring**
-  to read H-bond geometry. Point `HBPLUS_PATH` at your build (`export HBPLUS_PATH=/path/to/hbplus`). It is
-  **not** needed to run the design engine (which only reads the trained checkpoint).
+- **HBPLUS** is an external C binary (not pip-installable) used to read H-bond geometry. Point
+  `HBPLUS_PATH` at your build (`export HBPLUS_PATH=/path/to/hbplus`). It is needed by **every** entry
+  point that featurises a structure — the labeller, the fold scoring **and the design engine**: the
+  engine's `_build_context` calls the same `prepare_potts_input` pipeline, whose `CalculateHbondsPlus`
+  stage shells out to HBPLUS to produce the protonation labels. Only the pure read-only paths
+  (loading a checkpoint, re-scoring a shipped parquet) run without it.
 - Let the install finish uninterrupted — a killed `uv pip install` can leave the venv half-written (package
   metadata present, module files missing). If imports fail oddly, repair in place with
   `uv pip install --python .venv/bin/python --reinstall -e ./foundry -r requirements-extra.txt`.
@@ -54,7 +57,7 @@ a Jupyter kernel `ProtonPottsMPNN (.venv)`. Scripts just `import mpnn`; there ar
 | part | needs mpnn/torch | needs HBPLUS | needs FLAML stack | needs external oracle weights |
 |------|:---:|:---:|:---:|:---:|
 | **label a PDB** (`labeller/`) | ✅ | ✅ | ✅ | — |
-| **design a binder** (`inference/`) | ✅ | — | — | — |
+| **design a binder** (`inference/`) | ✅ | ✅ (featurisation) | — | — |
 | **score a fold** (`scoring/`) | ✅ | ✅ (pH-bonds) | — | — |
 | **benchmarks** (`benchmarks/`) | ✅ | — | — | ProteinMPNN arm only |
 | **train** (`training/`, reference) | ✅ | ✅ | — | — |
@@ -84,14 +87,24 @@ labels = ca.get_annotation("protonation_label")                  # per-residue t
 ```
 ```text
 chain  res_id res_name token
+    A      26      ASP  ASP-D     # deprotonated
     A      32      HIS  HIS-S     # neutral at rest
-    A      57      GLU  GLU-D     # deprotonated
-    B      52      HIS  HIS-S
-    …                             # 21 titratable residues, all neutral/deprotonated
+    A      57      GLU  GLU-D
+    B      52      HIS  HIS-P     # protonated (on the TARGET chain)
+    B      61      HIS  HIS-P
+    …                             # 21 titratable residues; the 4 on the binder are all neutral/deprotonated
 ```
-Note the read-out: the apo seed binder carries **no** strongly-protonated residue at rest — which is exactly
-why *design* (below) **pins** `HIS-P`/`ASP-P`/`GLU-P` centres deliberately rather than reading them off the
-input. The pipeline emits the discrete token (the model-input form); for the raw labeller probabilities
+Note the read-out: the apo seed **binder** (chain A) carries **no** strongly-protonated residue at rest —
+which is exactly why *design* (below) **pins** `HIS-P`/`ASP-P`/`GLU-P` centres deliberately rather than
+reading them off the input. (Two His on the PD-L1 **target** chain do come back `HIS-P`.)
+
+> The P-vs-neutral cut is part of the labels. `transforms/ev6/weights/thresholds.json` defaults to
+> `his prob_thr = 0.40`, but the packaged checkpoint was trained at `0.30` (recorded in its
+> `train_cfg.his_prob_thr`), and at 0.40 this same structure returns **zero** protonated residues. The
+> checkpoint loaders now register the checkpoint's own operating point with the live labeller
+> automatically, so inference reproduces training; `labeller/label_pdb.py` reads it off the packaged
+> checkpoint for the same reason. An explicit `EV6_HIS_PROB_THR` / `EV6_ACID_PROB_THR` still wins, so
+> deliberate sweeps are unaffected. The pipeline emits the discrete token (the model-input form); for the raw labeller probabilities
 (`p_protonated`, `sd`) call `mpnn.transforms.ev6.EV6Predictor` directly — the labeller `prepare_potts_input` wraps.
 
 ### 2. Design a pH-switch binder
@@ -187,7 +200,7 @@ designs (`pareto_fold_manifest.json`) ready to fold elsewhere and scores a shipp
 | **labeller AUPR** | `python labeller/pr_curve.py` | `labeller/{his,acid}_pr.png` (AP HIS 0.70, acids 0.33) |
 | **score a fold** | `HBPLUS_PATH=… python scoring/score_example.py` | pH-bond / charge-clash counts |
 | **placement by class** (library-wide) | `python benchmarks/placement_by_class.py` | `benchmarks/placement_by_class.png` |
-| **pKa benchmark** | `PROTON_ROOT=$PWD python -m mpnn.scripts.eval_pkad --checkpoints checkpoints/…/epoch-0125.ckpt` | `pkad_*.csv` + scatter |
+| **pKa benchmark** | `PROTON_ROOT=$PWD python -m mpnn.scripts.eval_pkad --ckpt_dir checkpoints/potts_v6_afdb_edge_his0.3_acid0.06 --extended_vocab v6 --output_dir benchmarks/results` | `pkad_*.csv` + scatter |
 | **stability benchmark** | `EV6_OUT_SUBDIR=his0.3_acid0.06 python benchmarks/stability_benchmark.py` | ΔΔG CSVs (GPU recommended) |
 | **3-way bar plot** | `EV6_OUT_SUBDIR=his0.3_acid0.06 python benchmarks/benchmark_barplot.py` | recovery + MegaScale + FireProt figure |
 | **binding AP** | `python benchmarks/binding_ap.py` | `benchmarks/results/summary_global_ap.png` |

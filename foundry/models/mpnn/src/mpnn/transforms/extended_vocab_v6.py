@@ -50,6 +50,42 @@ AA_AMBIGUOUS = {"ASP": ("ASP-A",), "GLU": ("GLU-A",), "HIS": ("HIS-A",)}
 
 _PREDICTOR = None          # live labeller (callbacks / inference) — operating point may be swept via env
 _PREDICTOR_DEFAULT = None   # score persistence — ALWAYS thresholds.json defaults, env-independent
+_CKPT_THR: tuple[float | None, float | None] = (None, None)   # operating point recorded by a checkpoint
+
+
+def set_checkpoint_operating_point(his_thr: float | None, acid_thr: float | None) -> None:
+    """Register the prob_thr operating point a loaded CHECKPOINT was trained at.
+
+    The label operating point is part of the model: a checkpoint trained on labels cut at
+    ``his_prob_thr=0.3`` sees a different token distribution than the ``thresholds.json`` default of
+    0.40, and nothing in the token set or the weight shapes catches the difference — so scoring at the
+    wrong cut is silently out of distribution. ``mpnn.train`` records the point it trained at in
+    ``train_cfg.{his,acid}_prob_thr``; the checkpoint loaders call this so the LIVE labeller reproduces
+    it instead of falling back to the JSON default.
+
+    Precedence (highest first): an explicitly-set ``EV6_HIS_PROB_THR`` / ``EV6_ACID_PROB_THR`` (the
+    documented sweep knob, so a deliberate sweep always wins) -> this checkpoint value -> thresholds.json.
+    The cached live predictor is invalidated when the effective point changes, so loading a second
+    checkpoint with a different point in one process re-labels correctly rather than silently reusing the
+    first one's threshold.
+    """
+    global _CKPT_THR, _PREDICTOR
+    new = (None if his_thr is None else float(his_thr),
+           None if acid_thr is None else float(acid_thr))
+    if new == _CKPT_THR:
+        return
+    before = _effective_prob_thr()
+    _CKPT_THR = new
+    if _effective_prob_thr() != before:
+        _PREDICTOR = None          # force a rebuild at the new operating point
+
+
+def _effective_prob_thr() -> tuple[float | None, float | None]:
+    """(his, acid) prob_thr actually used by the live labeller: env override, else checkpoint, else None."""
+    env_his, env_acid = _env_prob_thr()
+    ck_his, ck_acid = _CKPT_THR
+    return (env_his if env_his is not None else ck_his,
+            env_acid if env_acid is not None else ck_acid)
 
 
 def _env_prob_thr() -> tuple[float | None, float | None]:
@@ -70,12 +106,14 @@ def _env_prob_thr() -> tuple[float | None, float | None]:
 def _predictor():
     """Lazy module-singleton for LIVE labelling — loads the fold ensembles once, on first classify call.
 
-    Its prob_thr operating point is taken from the environment (see ``_env_prob_thr``) so the callbacks'
-    live FLAML matches the training threshold. The env is fixed at process launch, so caching is safe."""
+    Its prob_thr operating point is ``_effective_prob_thr()`` — the env override if set, else the point
+    recorded by the loaded checkpoint (see ``set_checkpoint_operating_point``), else thresholds.json — so
+    the live FLAML matches the threshold the model was trained at. ``set_checkpoint_operating_point``
+    invalidates this cache when the effective point changes, so caching stays safe."""
     global _PREDICTOR
     if _PREDICTOR is None:
         from mpnn.transforms.ev6 import EV6Predictor
-        his_thr, acid_thr = _env_prob_thr()
+        his_thr, acid_thr = _effective_prob_thr()
         _PREDICTOR = EV6Predictor(his_thr=his_thr, acid_thr=acid_thr)
     return _PREDICTOR
 

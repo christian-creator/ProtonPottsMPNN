@@ -224,6 +224,23 @@ def build_one(pdb, path):
 
 df = pd.read_parquet(os.environ.get("PROTON_TRAIN_DF", str(HERE.parent / "data/mpnn_split/train_df_filtered.parquet")))
 neut = df[df["method"].str.contains("NEUTRON", na=False)].drop_duplicates("pdb_id")
+
+# Restrict to the PDBs the stage-01/02 dumps actually cover -- see the same block in
+# 03_his_rich_features.py. Without it, any neutron PDB beyond stage 01/02's N_PDBS cap reached
+# the joins below with no H-bond and no charge row and was sentinel-filled rather than dropped.
+_covered = None
+for _dump in ("hbonds.parquet", "charge_ctx.parquet"):
+    _p = DATA / _dump
+    if not _p.exists():
+        raise FileNotFoundError(f"{_p} is missing -- run 01_hbond_dump.py and 02_charge_dump.py first.")
+    _pdbs = set(pd.read_parquet(_p, columns=["pdb"])["pdb"].unique())
+    _covered = _pdbs if _covered is None else (_covered & _pdbs)
+_n_all = len(neut)
+neut = neut[neut["pdb_id"].isin(_covered)]
+if len(neut) < _n_all:
+    print(f"  [cap] {_n_all} neutron PDBs in the split, {len(neut)} covered by the stage-01/02 dumps "
+          f"-- skipping {_n_all - len(neut)} uncovered (re-run 01/02 with a larger N_PDBS to include them)",
+          flush=True)
 print(f"{len(neut)} neutron PDBs; dropping any acid with a metal within {METAL_CUT} A of a carboxyl O\n",
       flush=True)
 

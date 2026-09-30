@@ -59,10 +59,36 @@ from mpnn.model.layers.graph_embeddings import PottsProteinFeatures
 from mpnn.model.pottsmpnn import PottsMPNN
 from mpnn.pipelines.potts_mpnn import build_mpnn_transform_pipeline as build_potts_pipeline
 
-# ── Hardcoded data paths (same as train.py) ───────────────────────────────────
-_PROJECT_ROOT = Path("/novo/users/cpjb/PHD/conditional_binding/ph")
-_PKAD_CSV = _PROJECT_ROOT / "data/PKAD/PKAD-R-v1.0_2026-04-22T16_0755.441Z.csv"
-_PKAD_PDB_DIR = _PROJECT_ROOT / "data/PKAD/pdb_cache"
+# ── PKAD data paths ───────────────────────────────────────────────────────────
+# Resolved, in order: $PROTON_ROOT/benchmarks/data/PKAD (the documented override), the
+# ProtonPottsMPNN checkout this package is installed from (the CSV + the 164-entry pdb_cache SHIP
+# there), then the original internal tree. Previously only the last of these existed, so the
+# standalone script could not find its data from a clean checkout even though the data was in-repo
+# -- and README's "benchmark scripts derive the package root from their location (override with
+# PROTON_ROOT)" did not hold for this script. --pkad_csv / --pdb_dir still override everything.
+_LEGACY_ROOT = Path("/novo/users/cpjb/PHD/conditional_binding/ph")
+
+
+def _resolve_pkad_paths() -> tuple[Path, Path]:
+    _csv_name = "PKAD-R-v1.0_2026-04-22T16_0755.441Z.csv"
+    _candidates = []
+    _env_root = os.environ.get("PROTON_ROOT", "").strip()
+    if _env_root:
+        _candidates.append(Path(_env_root) / "benchmarks/data/PKAD")
+    # .../<root>/foundry/models/mpnn/src/mpnn/scripts/eval_pkad.py -> parents[6] == <root>
+    try:
+        _candidates.append(Path(__file__).resolve().parents[6] / "benchmarks/data/PKAD")
+    except IndexError:
+        pass
+    _candidates.append(_LEGACY_ROOT / "data/PKAD")
+    for _d in _candidates:
+        if (_d / _csv_name).exists() and (_d / "pdb_cache").is_dir():
+            return _d / _csv_name, _d / "pdb_cache"
+    _d = _candidates[-1]
+    return _d / _csv_name, _d / "pdb_cache"
+
+
+_PKAD_CSV, _PKAD_PDB_DIR = _resolve_pkad_paths()
 
 _TITRATABLE = {"HIS", "ASP", "GLU"}
 
@@ -79,15 +105,39 @@ def _make_token_idx_tensor(
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
-def load_model(ckpt_path: Path, device: str) -> tuple["PottsMPNN", int]:
+def load_model(ckpt_path: Path, device: str, extended_vocab: str | None = None) -> tuple["PottsMPNN", int]:
+    """Load a checkpoint, sizing the featuriser to the checkpoint's OWN vocabulary.
+
+    This used to always build a default 32-token ``PottsProteinFeatures()``, so a 30-token v6
+    checkpoint failed the strict ``load_state_dict`` on ``W_s``/``W_out``/``etab_out``. The vocabulary
+    is taken from the checkpoint's recorded ``train_cfg.extended_vocab`` when present (the authoritative
+    source), else from ``extended_vocab``; a mismatch between the two is an error rather than a silent
+    out-of-distribution score, mirroring the guard in ``callbacks/pkad_benchmark.py``.
+    """
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    try:
+        ckpt_vocab = ckpt.get("train_cfg", {}).get("extended_vocab")
+    except Exception:
+        ckpt_vocab = None
+    if ckpt_vocab and extended_vocab and str(ckpt_vocab) != str(extended_vocab):
+        raise ValueError(
+            f"{ckpt_path} was trained with extended_vocab={ckpt_vocab!r} but --extended_vocab="
+            f"{extended_vocab!r} was requested. The encoder sees these tokens in S, so scoring across "
+            "vocabularies is out of distribution; re-run with --extended_vocab "
+            f"{ckpt_vocab!r}.")
+    vocab_name = str(ckpt_vocab) if ckpt_vocab else extended_vocab
+    if vocab_name:
+        feats = PottsProteinFeatures(token_encoding=get_vocab(vocab_name)["token_encoding"])
+    else:
+        feats = PottsProteinFeatures()
     model = PottsMPNN(
-        graph_featurization_module=PottsProteinFeatures(),
+        graph_featurization_module=feats,
         etab_source=PottsMPNN.infer_etab_source(ckpt["model"]),
     )
     model.apply(model.init_weights)
     model.load_state_dict(ckpt["model"])
     model.eval()
+    model.extended_vocab_name = vocab_name
     return model.to(device), ckpt["current_epoch"]
 
 
@@ -621,7 +671,7 @@ def main() -> None:
 
     pdb_groups, cache = build_pkad_cache(args.pkad_csv, args.pdb_dir, args.extended_vocab)
 
-    _probe, _ = load_model(selected[0], "cpu")
+    _probe, _ = load_model(selected[0], "cpu", args.extended_vocab)
     token_to_idx = _probe.token_to_idx
     # The token groups come from the checkpoint's vocabulary, never hardcoded: v3/v4 call neutral His
     # HID/HIE, v6 calls it HIS-S, and naming the wrong one silently drops that probability mass.
@@ -664,7 +714,7 @@ def main() -> None:
         torch.cuda.empty_cache()
 
     for ckpt_path in tqdm(selected, desc="Checkpoints", file=sys.stderr):
-        model, ckpt_epoch = load_model(ckpt_path, args.device)
+        model, ckpt_epoch = load_model(ckpt_path, args.device, args.extended_vocab)
         epoch = ckpt_epoch + 1  # shift so epoch 0 is reserved for the random baseline
         print(f"  → {ckpt_path.name}  (ckpt_epoch={ckpt_epoch} → plot_epoch={epoch})", flush=True)
 

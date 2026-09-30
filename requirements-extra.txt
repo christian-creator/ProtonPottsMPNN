@@ -1,5 +1,5 @@
 # Extra Python deps NOT already declared by foundry/pyproject.toml (rc-foundry).
-# Install AFTER `pip install -e foundry`.  See ENV.md.
+# Install AFTER `pip install -e foundry`.  See the "Install" section of README.md.
 
 # pandas 3.0 defaults to Arrow-backed strings, which FLAML 2.6 can't index (ArrowStringArray has no .iloc);
 # pin to the 2.x series the model was developed with.
@@ -17,6 +17,7 @@ ipdb
 
 # --- notebook / plots (inference/design_ph.ipynb) ---
 matplotlib>=3.8
+seaborn>=0.13        # imported at module load by mpnn.scripts.eval_pkad (the PKAD benchmark)
 nbconvert>=7
 nbformat>=5
 jupyterlab>=4

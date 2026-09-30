@@ -1,5 +1,8 @@
 # Environment (rebuild with ./install.sh)
 .venv/
+# also ignore a .venv SYMLINK -- the trailing-slash rule above matches directories only, so a venv
+# built on another filesystem and linked in here would otherwise show up as untracked.
+.venv
 
 # Python
 __pycache__/

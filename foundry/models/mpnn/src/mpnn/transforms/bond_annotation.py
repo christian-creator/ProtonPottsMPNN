@@ -286,15 +286,22 @@ def calculate_hbonds(
                     merged[key] = dict(item)
         return list(merged.values())
 
-    hbplus_exe = os.environ.get("HBPLUS_PATH")
+    # HBPLUS is an external C binary; it must be pointed at explicitly.
+    # There used to be a fallback to a hardcoded developer laptop path
+    # ("/Users/chrjac/Library/CloudStorage/OneDrive-.../tools/hbplus/hbplus") between these two
+    # blocks, which made the check below unreachable: with HBPLUS_PATH unset, every caller failed
+    # with a FileNotFoundError naming someone else's macOS home instead of the actionable message.
+    hbplus_exe = os.environ.get("HBPLUS_PATH", "").strip()
 
-    if hbplus_exe is None or hbplus_exe == "":
-        hbplus_exe = "/Users/chrjac/Library/CloudStorage/OneDrive-DanmarksTekniskeUniversitet/PHD/tools/hbplus/hbplus"
-
-    if hbplus_exe is None or hbplus_exe == "":
+    if not hbplus_exe:
         raise ValueError(
             "HBPLUS_PATH environment variable not set. "
             "Please set it to the path of the hbplus executable in order to calculate hydrogen bonds."
+        )
+    if not os.path.exists(hbplus_exe):
+        raise FileNotFoundError(
+            f"HBPLUS_PATH={hbplus_exe!r} does not exist. Point it at your hbplus build "
+            "(an external C binary, not pip-installable)."
         )
 
 

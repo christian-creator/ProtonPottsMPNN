@@ -797,6 +797,19 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
         vocab_name = self._resolve_vocab_name()
         # remember the resolved name so _build_context featurises S in the SAME vocabulary
         self._vocab_name = vocab_name
+        # Reproduce the LABEL OPERATING POINT this checkpoint was trained at. The packaged v6 checkpoint
+        # records his_prob_thr=0.3, while transforms/ev6/weights/thresholds.json defaults to 0.40 — so
+        # without this every design run labelled His at a different cut than training, silently and with
+        # nothing to catch it (the token set and weight shapes are identical either way). An explicit
+        # EV6_HIS_PROB_THR / EV6_ACID_PROB_THR still wins, so deliberate sweeps are unaffected.
+        _tc = checkpoint.get("train_cfg") or {}
+        try:
+            _his_thr, _acid_thr = _tc.get("his_prob_thr"), _tc.get("acid_prob_thr")
+        except Exception:
+            _his_thr = _acid_thr = None
+        if _his_thr is not None or _acid_thr is not None:
+            from mpnn.transforms import extended_vocab_v6
+            extended_vocab_v6.set_checkpoint_operating_point(_his_thr, _acid_thr)
         if vocab_name:
             feats = PottsProteinFeatures(token_encoding=get_vocab(vocab_name)["token_encoding"])
             model = PottsMPNN(graph_featurization_module=feats, **potts_kwargs)
