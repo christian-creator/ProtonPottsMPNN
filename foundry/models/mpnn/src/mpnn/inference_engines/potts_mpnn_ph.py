@@ -1326,6 +1326,47 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
         return PlacementPin(position=int(position), protonation_type=ptype, prot_idx=prot_idx,
                             dep_idxs=dep_idxs, res_id=int(ctx.token_aa.res_id[int(position)]))
 
+    def score_native_baseline(self, ctx, crit, *, centers=None) -> Dict[str, Any]:
+        """Score the NATIVE (input-PDB) binder sequence with the design energy recipe, as a baseline.
+
+        ``final_potts_energy`` is H of the native sequence exactly as it comes off the backbone --
+        nothing pinned -- so it is the honest "before any design" number, directly comparable to a
+        design's ``final_potts_energy`` (both are ``ctx.scorer.H_of``).
+
+        ``selective_energy`` is only meaningful relative to a SET OF CENTRES, so it is measured the
+        way a design's is: the same centre positions locked to RES-P, each gap evaluated in the
+        presence of the others (``_selective_energy_sum``, which is what ``_score_design`` reduces to
+        -- a design's sequence already carries its centres pinned). Pass ``centers`` as
+        ``(res_id, protonation_type)`` pairs, normally a design's ``center_res_ids`` /
+        ``center_protonation_types``, to compare like with like; the number says what selective gap
+        the NATIVE sequence context already afforded at those sites, before the redesign.
+
+        NOTE therefore that ``selective_energy`` is measured on the native sequence WITH the centres
+        substituted in -- it is not a property of whatever native residues occupy those positions
+        (a RES-P-vs-RES-D gap is undefined without placing those tokens). Only
+        ``final_potts_energy`` and ``canonical_sequence`` describe the untouched native sequence.
+        Callers that surface both next to each other should label them accordingly.
+        ``selective_energy`` is None when ``centers`` is empty.
+        """
+        binder_idx = ctx.chainA_all_idx.tolist()
+        seq = ctx.S_native
+        res_to_pos = {int(ctx.token_aa.res_id[int(i)]): int(i) for i in binder_idx}
+        pins = []
+        for res_id, ptype in (centers or []):
+            if int(res_id) not in res_to_pos:
+                raise KeyError(
+                    f"centre res_id {res_id} is not a position of binder chain {ctx.binder_chain!r} "
+                    f"(binder res_ids {min(res_to_pos)}..{max(res_to_pos)}).")
+            pins.append(self._pin(ctx, crit, res_to_pos[int(res_id)], ptype))
+        return {
+            "canonical_sequence": ctx.decode_canonical(seq, binder_idx),
+            "extended_tokens": ctx.extended_tokens(seq, binder_idx),
+            "final_potts_energy": ctx.scorer.H_of(seq),
+            "selective_energy": _selective_energy_sum(ctx, seq, pins) if pins else None,
+            "global_protonation_dH": _global_protonation_dH(ctx, seq),
+            "centers": [(int(p.res_id), p.protonation_type) for p in pins],
+        }
+
     def enumerate_placement_plans(self, ctx, crit, field_fn, valid_mask, initial_sequence, *, rng):
         """Placement plans for this seed. explicit_centers -> ONE hand-picked plan. Otherwise draw
         candidate positions from the chosen placement function (random / scan_potts / scan_mpnn) within

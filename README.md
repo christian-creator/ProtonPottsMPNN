@@ -156,14 +156,29 @@ designs (`pareto_fold_manifest.json`) ready to fold elsewhere and scores a shipp
 
 | file | what |
 |------|------|
-| `designs.fasta` | 1-letter canonical sequence (RF3-foldable) |
-| `designs_states.fasta` | the **3-letter + protonation-state** sequence (`… ASP-P … HIS-P …`) |
-| `designs.tsv` / `designs.json` | both sequence forms + energies + pinned centres |
+| `designs.fasta` | 1-letter canonical sequence (RF3-foldable). **First record is the original** (native input-PDB) binder |
+| `designs_states.fasta` | the **3-letter + protonation-state** sequence (`… ASP-P … HIS-P …`), native record first |
+| `designs.tsv` / `designs.json` | both sequence forms + energies + pinned centres, **plus the native baseline** (`native_potts_energy`, `native_sel_at_centres`, `native_canonical_sequence`) and the deltas `dH_vs_native` / `dsel_vs_native` |
 | `trajectory.tsv` | the binder sequence (1-letter **and** 3-letter/protonation) **at every optimisation step** |
 | `sweep_designs.tsv` | the N sweep designs (λ, stability, selectivity, both sequences) |
 | `pareto_fold_manifest.json` | the `N_FOLD` Pareto designs selected to fold (sequence, binder/target chains, centres) |
 | `pareto_fold_scores.csv` | per-fold clash / pH-bond scores (**only when RF3 is available**) |
 | `placement_scan.png` · `optimisation_trajectory.png` · `pareto_front.png` | the figures |
+
+**Reading the native (original) baseline.** Every design is reported against the untouched input-PDB
+binder, scored with the *same* recipe (`PottsMPNNPHEngine.score_native_baseline`):
+
+* `native_potts_energy` is `H` of the native sequence exactly as it comes off the backbone, nothing
+  pinned — directly comparable to a design's `potts_energy` (both are `ctx.scorer.H_of`). Lower = stabler,
+  so a **positive** `dH_vs_native` means the design traded stability away.
+* `native_sel_at_centres` is **not** a property of the native residues. A RES-P-vs-RES-D gap is undefined
+  without placing those tokens, so it is measured on the native sequence **with the design's centres
+  substituted in** — which is exactly what makes it comparable to the design's `selective_energy`. The
+  sequence printed in the FASTA record keeps its native residues at those positions; the number does not
+  describe it.
+* The two therefore decompose the result: `native_sel_at_centres` is what **site choice alone** bought,
+  the design's `selective_energy` is site choice **+** surrounding redesign, and `dsel_vs_native` isolates
+  the redesign's contribution with placement held fixed.
 
 > Point it at your own backbone by editing `PDB` / `BINDER_CHAIN` (or `inference/examples/example_meta.json`).
 > The checkpoint's `extended_vocab` **must** be `"v6"` or the 30-token weight load fails.

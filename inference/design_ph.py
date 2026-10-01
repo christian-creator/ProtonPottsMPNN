@@ -168,27 +168,92 @@ print(f"global ΔH (prot): {best.global_protonation_dH}")
 print(f"binder sequence : {best.canonical_sequence}")
 print(f"extended tokens : {' '.join(best.extended_tokens)}")
 
+# --- the ORIGINAL (native, input-PDB) binder, scored with the SAME recipe, as a baseline ----------
+# H  : the native sequence exactly as it comes off the backbone, nothing pinned -> the honest
+#      "before any design" number, comparable to a design's final_potts_energy (both ctx.scorer.H_of).
+# sel: only defined against a centre SET, so it is measured at this design's own centres with them
+#      locked protonated -- the selective gap the NATIVE context already afforded there, pre-redesign.
+NATIVE_ID = f"native_{META['pdb_id']}_chain{BINDER_CHAIN}"
+native = engine.score_native_baseline(
+    ctx, crit, centers=list(zip(best.center_res_ids or [], best.center_protonation_types or [])))
+NATIVE_CENTRES = ";".join(f"{r}:{t}" for r, t in native["centers"])
+
+
+def _fmt(x, nd=3):                                  # energies are None for centre-free designs
+    return "NA" if x is None else f"{x:.{nd}f}"
+
+
+def _delta(d, n):                                   # design - native (negative H = design is stabler)
+    return None if (d is None or n is None) else float(d) - float(n)
+
+
+def _native_sel_at(d):
+    """Native selective energy at *this* design's centres (designs in a set may differ)."""
+    if not d.center_res_ids:
+        return None
+    return engine.score_native_baseline(
+        ctx, crit, centers=list(zip(d.center_res_ids, d.center_protonation_types)))["selective_energy"]
+
+
+print("--- original (native input-PDB) baseline ---")
+print(f"native Potts H  : {_fmt(native['final_potts_energy'])}"
+      f"   (design - native = {_fmt(_delta(best.final_potts_energy, native['final_potts_energy']))})")
+print(f"native sel @ centres {native['centers']} (centres substituted in): "
+      f"{_fmt(native['selective_energy'])}"
+      f"   (design - native = {_fmt(_delta(best.selective_energy, native['selective_energy']))})")
+print(f"native ΔH (prot): {_fmt(native['global_protonation_dH'])}")
+print(f"native sequence : {native['canonical_sequence']}")
+
 # write the design(s) out — canonical FASTA (foldable), a parallel 3-letter/protonation FASTA, a flat TSV,
 # and the metadata json. Everything stays inside inference/outputs/.
 with open(OUT / "designs.fasta", "w") as fh:                       # 1-letter canonical (for folding)
+    fh.write(f">{NATIVE_ID} H={_fmt(native['final_potts_energy'])} "            # the ORIGINAL, for reference
+             f"sel_at_centres={_fmt(native['selective_energy'])} centres={NATIVE_CENTRES} "
+             f"original_input_pdb_binder "
+             # H is this exact sequence; sel_at_centres is this sequence WITH the centres above
+             # substituted in (a gap is undefined otherwise) -- so it is not a property of the
+             # residues printed below, and that is what makes it comparable to a design's sel.
+             f"note=sel_at_centres_measured_with_centres_substituted\n"
+             f"{native['canonical_sequence']}\n")
     for d in design_set:
-        fh.write(f">{d.design_id()} H={d.final_potts_energy:.3f} sel={d.selective_energy}\n"
+        fh.write(f">{d.design_id()} H={d.final_potts_energy:.3f} sel={_fmt(d.selective_energy)}\n"
                  f"{d.canonical_sequence}\n")
 with open(OUT / "designs_states.fasta", "w") as fh:                # 3-letter + PROTONATION STATE per residue
+    fh.write(f">{NATIVE_ID} H={_fmt(native['final_potts_energy'])} "            # the ORIGINAL, for reference
+             f"sel_at_centres={_fmt(native['selective_energy'])} centres={NATIVE_CENTRES} "
+             f"original_input_pdb_binder "
+             # H is this exact sequence; sel_at_centres is this sequence WITH the centres above
+             # substituted in (a gap is undefined otherwise) -- so it is not a property of the
+             # residues printed below, and that is what makes it comparable to a design's sel.
+             f"note=sel_at_centres_measured_with_centres_substituted\n"
+             f"{' '.join(native['extended_tokens'])}\n")
     for d in design_set:
-        fh.write(f">{d.design_id()} H={d.final_potts_energy:.3f} sel={d.selective_energy}\n"
+        fh.write(f">{d.design_id()} H={d.final_potts_energy:.3f} sel={_fmt(d.selective_energy)}\n"
                  f"{' '.join(d.extended_tokens)}\n")                # e.g. ALA ALA ARG … ASP-P … HIS-P …
 pd.DataFrame([{                                                     # one flat table with both sequence forms
     "design_id": d.design_id(),
     "combined_lambda": d.combined_lambda,
     "potts_energy": d.final_potts_energy,
     "selective_energy": d.selective_energy,
+    "native_potts_energy": native["final_potts_energy"],            # the ORIGINAL, same recipe
+    # native sel with THIS design's centres substituted into the native sequence (see README):
+    "native_sel_at_centres": _native_sel_at(d),
+    "dH_vs_native": _delta(d.final_potts_energy, native["final_potts_energy"]),
+    "dsel_vs_native": _delta(d.selective_energy, _native_sel_at(d)),
     "centers": ";".join(f"{r}:{t}" for r, t in zip(d.center_res_ids or [], d.center_protonation_types or [])),
     "canonical_sequence": d.canonical_sequence,
+    "native_canonical_sequence": native["canonical_sequence"],
     "extended_tokens": " ".join(d.extended_tokens),
 } for d in design_set]).to_csv(OUT / "designs.tsv", sep="\t", index=False)
-with open(OUT / "designs.json", "w") as fh:
-    json.dump([d.to_metadata() for d in design_set], fh, indent=2, default=float)
+with open(OUT / "designs.json", "w") as fh:                        # list shape kept; native_* added per entry
+    json.dump([{**d.to_metadata(),
+                "native_potts_energy": native["final_potts_energy"],
+                "native_sel_at_centres": _native_sel_at(d),
+                "dH_vs_native": _delta(d.final_potts_energy, native["final_potts_energy"]),
+                "dsel_vs_native": _delta(d.selective_energy, _native_sel_at(d)),
+                "native_canonical_sequence": native["canonical_sequence"],
+                "native_extended_tokens": " ".join(native["extended_tokens"]),
+                } for d in design_set], fh, indent=2, default=float)
 print("wrote", OUT / "designs.fasta", "(canonical),", OUT.name + "/designs_states.fasta (3-letter+state),",
       OUT.name + "/designs.tsv,", OUT.name + "/designs.json")
 
