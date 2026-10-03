@@ -288,13 +288,17 @@ def calculate_hbonds(
 
     hbplus_exe = os.environ.get("HBPLUS_PATH")
 
-    if hbplus_exe is None or hbplus_exe == "":
-        hbplus_exe = "/Users/chrjac/Library/CloudStorage/OneDrive-DanmarksTekniskeUniversitet/PHD/tools/hbplus/hbplus"
-
-    if hbplus_exe is None or hbplus_exe == "":
+    if not hbplus_exe:
         raise ValueError(
             "HBPLUS_PATH environment variable not set. "
             "Please set it to the path of the hbplus executable in order to calculate hydrogen bonds."
+        )
+
+    hbplus_exe = os.path.abspath(hbplus_exe)
+    if not os.path.isfile(hbplus_exe):
+        raise ValueError(
+            f"HBPLUS_PATH is set to {hbplus_exe!r}, which is not a file. "
+            "Please point it at the hbplus executable."
         )
 
 
