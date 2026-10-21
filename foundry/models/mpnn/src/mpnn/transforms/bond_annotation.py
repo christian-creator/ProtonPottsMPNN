@@ -17,7 +17,6 @@ from atomworks.ml.utils.token import get_token_starts
 from biotite.structure import AtomArray
 from biotite.structure.io.pdb import PDBFile
 
-import ipdb
 # ---------------------------------------------------------------------------
 # Salt-bridge detection (PLIP-compatible, no hydrogens required)
 # ---------------------------------------------------------------------------
