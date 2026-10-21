@@ -297,9 +297,13 @@ def calculate_hbonds(
             "HBPLUS_PATH environment variable not set. "
             "Please set it to the path of the hbplus executable in order to calculate hydrogen bonds."
         )
-    if not os.path.exists(hbplus_exe):
+    # Resolve before checking, so a relative HBPLUS_PATH is reported (and executed) as the absolute
+    # path it actually means. isfile, not exists: a DIRECTORY passes exists() and would otherwise fail
+    # later inside subprocess with a far less obvious error.
+    hbplus_exe = os.path.abspath(hbplus_exe)
+    if not os.path.isfile(hbplus_exe):
         raise FileNotFoundError(
-            f"HBPLUS_PATH={hbplus_exe!r} does not exist. Point it at your hbplus build "
+            f"HBPLUS_PATH={hbplus_exe!r} is not a file. Point it at your hbplus build "
             "(an external C binary, not pip-installable)."
         )
 
