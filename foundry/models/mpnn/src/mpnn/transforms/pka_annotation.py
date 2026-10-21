@@ -7,7 +7,6 @@ from pathlib import Path
 import biotite.structure as struc
 import biotite.structure.io.pdb as pdb_io
 import numpy as np
-import propka.run
 from atomworks.ml.transforms.base import Transform
 
 NEIGHBOR_AA_ORDER = (
@@ -191,6 +190,8 @@ class AnnotatePKA(Transform):
         return pka_corr
 
     def forward(self, data):
+        import propka.run  # imported here: only the pKa transforms need it, not the design path
+
         aa = data["atom_array"]
         pka_values = np.full(len(aa), np.nan, dtype=np.float32)
 

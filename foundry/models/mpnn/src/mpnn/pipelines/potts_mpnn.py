@@ -117,8 +117,14 @@ def get_protonation_state_transforms(
     use_salt_bridge: bool = True,
     deterministic: bool = True,
     protonation_seed: int | None = None,
+    protonation_classifier=None,
+    annotate_bonds: bool = True,
 ):
     """H-bond / salt-bridge annotation + protonation labelling for one named vocabulary.
+
+    ``protonation_classifier`` replaces the vocabulary's labeller (see AnnotateProtonationStates).
+    The H-bond and salt-bridge passes only feed the geometric labellers and the bond-label heads,
+    so ``annotate_bonds=False`` leaves them out (and with them the need for HBPLUS).
 
     `cutoff_HA_dist`, `cutoff_DA_dist` and `filter_capability` are NOT free knobs: they decide which
     bonds ever reach the classifier, so they belong to the vocabulary and are taken from it
@@ -127,6 +133,17 @@ def get_protonation_state_transforms(
     feature pool -- changing them here silently changes what EV6's models see.
     """
     vocab = get_vocab(extended_vocab)
+    labelling = AnnotateProtonationStates(
+        extended_vocab=extended_vocab,
+        use_salt_bridge=use_salt_bridge,
+        # deterministic=False samples the ambiguous per-atom roles AND the symmetric
+        # shared-proton dyads (one -P / one -D per pair) -- training augmentation / inspection.
+        deterministic=deterministic,
+        seed=protonation_seed,
+        classify=protonation_classifier,
+    )
+    if not annotate_bonds:
+        return [RemoveHydrogens(), labelling]
     return [
         # H off first, so HBPLUS always places its own: with deposited H (every neutron entry) the label
         # would be read off the observed answer. EV6's models are trained on H-stripped structures.
@@ -148,14 +165,7 @@ def get_protonation_state_transforms(
             dist_max=saltbridge_dist_max,
             min_dist=saltbridge_dist_min,
         ),
-        AnnotateProtonationStates(
-            extended_vocab=extended_vocab,
-            use_salt_bridge=use_salt_bridge,
-            # deterministic=False samples the ambiguous per-atom roles AND the symmetric
-            # shared-proton dyads (one -P / one -D per pair) -- training augmentation / inspection.
-            deterministic=deterministic,
-            seed=protonation_seed,
-        ),
+        labelling,
     ]
 
 
@@ -198,6 +208,10 @@ def build_mpnn_transform_pipeline(
                                         # residues still *-A (a much smaller trigger set).
     deterministic: bool = True,         # False -> sample ambiguous roles + symmetric dyads (augmentation)
     protonation_seed: int | None = None,
+    # A labeller to use instead of the vocabulary's (e.g. PropkaLabeller). Its tokens must belong to
+    # extended_vocab. Unless build_bond_labels is set, the H-bond and salt-bridge passes then have no
+    # consumer and are skipped, so HBPLUS is not run.
+    protonation_classifier=None,
     # Train-time protonation OPERATING POINT (v6 only). When either is set, ApplyProtonationThreshold
     # re-derives `protonation_label` from the snapshot's persisted FLAML scores at this prob_thr, just
     # before S is built -- making the P-vs-D cut a per-run knob to sweep WITHOUT re-running FLAML. sd_cut
@@ -276,6 +290,8 @@ def build_mpnn_transform_pipeline(
             use_salt_bridge=use_salt_bridge,
             deterministic=deterministic,
             protonation_seed=protonation_seed,
+            protonation_classifier=protonation_classifier,
+            annotate_bonds=protonation_classifier is None or build_bond_labels,
         )
 
     # pKa annotation is training-only and expensive; not yet consumed by encoding.

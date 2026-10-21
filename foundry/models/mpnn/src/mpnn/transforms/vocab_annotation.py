@@ -74,6 +74,8 @@ class AnnotateProtonationStates(Transform):
     seed : int | None
         Seed for the sampling RNG. None -> fresh randomness each call (re-sampled per epoch).
         Only matters when deterministic=False.
+    classify : callable | None
+        A labeller to use instead of the vocabulary's own; see ``self.classify`` below.
     """
 
     def __init__(
@@ -86,10 +88,14 @@ class AnnotateProtonationStates(Transform):
         seed: int | None = None,
         use_salt_bridge: bool = True,
         persist_scores: bool = False,
+        classify=None,
     ):
         self.extended_vocab = extended_vocab
         vocab = get_vocab(extended_vocab)   # raises on an unknown name
-        self.classify = vocab["classify"]
+        # ``classify`` replaces the vocabulary's labeller (same call: atom_array -> {(chain, res_id,
+        # res_name): token}), for example mpnn.transforms.propka_labeller.PropkaLabeller. The tokens
+        # must belong to the vocabulary, since the encoder reads them.
+        self.classify = classify if classify is not None else vocab["classify"]
         # v6-only labeller that returns the raw FLAML score alongside the token, so the snapshot can carry
         # the continuous p/sd/metal and the threshold be swept at train time. None for v3/v4.
         self.classify_scores = vocab.get("classify_scores")

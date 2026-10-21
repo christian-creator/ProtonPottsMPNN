@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """PottsMPNN-pH redesign engine (foundry wrapper).
 
 Mirrors the ``MPNNWithLogProbs`` pattern: subclass the foundry PottsMPNN inference engine
@@ -34,10 +32,13 @@ Conventions (unify the Potts energy head and the decoder log-prob field):
   (the foundry's own 21-token ``_decode_sequences`` cannot render the 11 protonation tokens).
 """
 
+from __future__ import annotations
+
 import copy
+import logging
 import multiprocessing as mp
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import numpy as np
@@ -48,12 +49,25 @@ import torch.nn.functional as F
 from atomworks.constants import DICT_THREE_TO_ONE, UNKNOWN_AA
 from atomworks.ml.utils.token import get_token_starts
 from biotite.structure import AtomArray
-
 from mpnn.inference_engines.potts_mpnn import MPNNInferenceEngine
 from mpnn.metrics.sequence_recovery import _build_canonical_map
 from mpnn.model.layers.graph_embeddings import PottsProteinFeatures
 from mpnn.model.pottsmpnn import PottsMPNN
+from mpnn.ph.config import ProtonationSources, SwitchDesignConfig
+from mpnn.ph.engine_adapter import (
+    PottsScorerAdapter,
+    knn_partner_rank,
+    parent_names,
+    positions_in_complex,
+)
+from mpnn.ph.session import DesignInputs, EnsembleRun, SwitchDesignRun
+from mpnn.ph.session import run_switch_design as _run_switch_design
+from mpnn.ph.session import run_switch_design_ensemble as _run_switch_design_ensemble
+from mpnn.ph.states import SiteKey, site_index_from_arrays
+from mpnn.ph.vocab_meta import TokenTable
 from mpnn.potts_inference import prepare_potts_input
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +102,9 @@ DEFAULT_DEP_MAP: Dict[str, List[str]] = {
 }
 # Microstates forbidden as design *choices* (centre placement is set separately).
 DEFAULT_FORBIDDEN_TOKENS: List[str] = ["HIS-A", "ASP-A", "GLU-A", "HIS-D"]
+
+
+DEFAULT_INTERFACE_DISTANCE = 6.0   # angstroms, CA-CA; see PHDesignCriteria.interface_distance
 
 
 @dataclass
@@ -234,8 +251,14 @@ class PHDesignCriteria:
     # the max_mutations positions CLOSEST-coupled to the centres (by _knn_rank). 0 = no cap (default no-op).
     # Sweepable (see _axis_expand / the sampling block).
     max_mutations: int = 0
+    # Binder residues whose CA lies within this many angstroms of any target CA form the "interface"
+    # placement region. 6 suits compact interfaces; loops that reach over the target (e.g. nanobody
+    # CDRs) may need 8 or more, otherwise "interface" can come out empty and no site is found.
+    interface_distance: float = DEFAULT_INTERFACE_DISTANCE
 
     def __post_init__(self) -> None:
+        if self.interface_distance <= 0:
+            raise ValueError(f"interface_distance must be > 0 (got {self.interface_distance}).")
         if self.method not in ALL_METHODS:
             raise ValueError(f"Unknown method '{self.method}'. Available: {ALL_METHODS}")
         if self.backend not in ("potts", "mpnn"):
@@ -513,7 +536,7 @@ class PHDesignOutput:
     ``final_potts_energy`` is the whole-system Potts Hamiltonian (lower = stabler).
     ``selective_energy`` is the centre RES-P-vs-RES-D gap (lower = RES-P preferred).
     ``global_protonation_dH`` is the binder's H(all titratable→prot) − H(→deprot)
-    (lower = prefers protonated / low-pH-favoured). Placement metrics describe the chosen site.
+    (lower = prefers protonated). Placement metrics describe the chosen site.
     """
 
     binder_chain: str
@@ -559,12 +582,35 @@ class PHDesignOutput:
     # token string), so any step's sequence can be saved. step 0 = initial seq.
     energy_trajectory: Optional[List[Dict[str, Any]]] = None
 
+    # Set by PHDesignSet.deduped() when two DIFFERENT sequences share a design_id (the id does not encode
+    # every swept knob), so neither is silently dropped. Empty for the usual case: ids are unchanged.
+    id_suffix: str = ""
+
     def design_id(self) -> str:
         if self.protonation_type is not None and self.center_res_ids:
             seed_tag = "" if self.seed_idx is None else f"_seed{self.seed_idx}"
             res_tag = "-".join(str(r) for r in self.center_res_ids)
-            return f"{self.protonation_type}_{self.scheme}{seed_tag}_res{res_tag}_s{self.sample}"
-        return f"{self.scheme}_s{self.sample}"
+            return f"{self.protonation_type}_{self.scheme}{seed_tag}_res{res_tag}_s{self.sample}{self.id_suffix}"
+        return f"{self.scheme}_s{self.sample}{self.id_suffix}"
+
+    def to_row(self, reference_sequence: Optional[str] = None) -> Dict[str, Any]:
+        """``to_metadata()`` plus the fields tables usually want (see ``PHDesignSet.to_rows``)."""
+        row = self.to_metadata()
+        row["binder_chain"] = self.binder_chain
+        row["canonical_sequence"] = self.canonical_sequence
+        row["centers"] = [
+            f"{res_id}:{ptype}"
+            for res_id, ptype in zip(self.center_res_ids or [], self.center_protonation_types or [])
+        ]
+        if reference_sequence is not None:
+            if len(reference_sequence) != len(self.canonical_sequence):
+                raise ValueError(
+                    f"reference_sequence has {len(reference_sequence)} residues, the design "
+                    f"{len(self.canonical_sequence)}")
+            row["n_mutations"] = sum(a != b for a, b in zip(reference_sequence, self.canonical_sequence))
+        else:
+            row["n_mutations"] = None
+        return row
 
     def to_metadata(self) -> Dict[str, Any]:
         """Energy scores + provenance for InverseFoldOutputItem.metadata (rewards stage)."""
@@ -612,13 +658,35 @@ class PHDesignSet(list):
         return PHDesignSet(sorted(self, key=lambda d: d.final_potts_energy))
 
     def deduped(self) -> "PHDesignSet":
-        seen, out = set(), PHDesignSet()
+        """Drop exact repeats (same id AND same sequence); keep designs that share an id but differ
+        in sequence under a ``~k`` id suffix. First occurrence wins, so the order of ``self`` decides.
+
+        Every id already present in ``self`` is reserved, so a new suffix never lands on another
+        design's id, and a record that needs a new id is copied: the inputs are not modified."""
+        taken = {d.design_id() for d in self}
+        by_id: Dict[str, set] = {}
+        out = PHDesignSet()
         for d in self:
-            did = d.design_id()
-            if did not in seen:
-                seen.add(did)
-                out.append(d)
+            did, seq = d.design_id(), tuple(d.extended_tokens)
+            known = by_id.setdefault(did, set())
+            if seq in known:
+                continue
+            if known:
+                k = 2
+                while f"{did}~{k}" in taken:
+                    k += 1
+                d = replace(d, id_suffix=d.id_suffix + f"~{k}")
+                taken.add(d.design_id())
+            known.add(seq)
+            out.append(d)
         return out
+
+    def to_rows(self, reference_sequence: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Plain dicts, one per design, for tables and downstream code.
+
+        ``to_metadata()`` plus ``canonical_sequence``, ``centers`` (``"res_id:type"``) and, when the
+        starting binder sequence is given as ``reference_sequence``, ``n_mutations`` (Hamming distance)."""
+        return [d.to_row(reference_sequence) for d in self]
 
     def top(self, n: int) -> "PHDesignSet":
         return PHDesignSet(self.deduped().sorted_by_energy()[:n])
@@ -722,7 +790,7 @@ def _binder_region_masks(proc_atom_array, token_aa, binder_chain, chainA_t, devi
                     if p is not None:
                         iface[p] = True
     except Exception:
-        pass
+        logger.warning("interface region could not be computed; it will be empty", exc_info=True)
     try:                                                      # core/surface: residue-level RASA
         # RESIDUE SASA / MAX ASA, which is what a 0.2 "buried" threshold means.
         #
@@ -751,13 +819,70 @@ def _binder_region_masks(proc_atom_array, token_aa, binder_chain, chainA_t, devi
             else:
                 surface[p] = True
     except Exception:
-        pass
+        logger.warning("core/surface regions could not be computed; they will be empty", exc_info=True)
     return {"interface": iface, "core": core, "surface": surface}
 
 
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
+
+def _needs_site_pka(config: SwitchDesignConfig) -> bool:
+    """PROPKA's reference pKa values are only needed when they are asked for (which the config
+    only allows for the linked-equilibrium model, the one that uses a pKa)."""
+    return config.protonation.reference_pka == "propka"
+
+
+def _with_seed(config: SwitchDesignConfig, seed: Optional[int]) -> SwitchDesignConfig:
+    """One seed for a switch-design run: ``seed``, when given, overrides ``config.base_seed``."""
+    return config if seed is None else replace(config, base_seed=int(seed))
+
+
+def _as_protonation(protonation) -> ProtonationSources:
+    """ProtonationSources from one, a plain dict, or None (the defaults: EV6 states, constant pKa)."""
+    if isinstance(protonation, ProtonationSources):
+        return protonation
+    return ProtonationSources.from_dict(protonation)
+
+
+def _check_propka_available(config: SwitchDesignConfig) -> None:
+    """Both PROPKA settings need it; fail now, before any structure is read."""
+    if config.protonation.states == "propka" or _needs_site_pka(config):
+        from mpnn.transforms.propka_labeller import require_propka
+
+        require_propka()
+
+
+def _describe_protonation(protonation: ProtonationSources) -> str:
+    states = (
+        f"PROPKA (pH {protonation.ph:g}, margin {protonation.margin:g})"
+        if protonation.states == "propka"
+        else "EV6"
+    )
+    pka = "PROPKA on the free partners" if protonation.reference_pka == "propka" else "per-type constants"
+    return f"starting states {states}, reference pKa {pka}"
+
+
+def _protonation_classifier(protonation: ProtonationSources):
+    """The labeller the starting states ask for: None keeps the vocabulary's own (EV6)."""
+    if protonation.states == "ev6":
+        return None
+    from mpnn.transforms.propka_labeller import PropkaLabeller, require_propka
+
+    require_propka()  # fail here, not after the structure has been parsed
+    return PropkaLabeller(ph=protonation.ph, margin=protonation.margin)
+
+
+def _to_device(obj, device):
+    """Move every tensor in a nested dict/list/tuple onto ``device``."""
+    if isinstance(obj, torch.Tensor):
+        return obj.to(device)
+    if isinstance(obj, dict):
+        return {k: _to_device(v, device) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return type(obj)(_to_device(v, device) for v in obj)
+    return obj
+
 
 class PottsMPNNPHEngine(MPNNInferenceEngine):
     """Foundry PottsMPNN engine + protonation-aware redesign methods."""
@@ -1038,6 +1163,163 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
                 for ec, eb in zip(E_cplx, E_bind)]
 
     # ------------------------------------------------------------------ #
+    # State-specified switch design (mpnn.ph): any pH direction, both sides
+    # ------------------------------------------------------------------ #
+    @torch.no_grad()
+    def run_switch_design(
+        self,
+        *,
+        atom_array: AtomArray,
+        binder_chain: str,
+        config,
+        seed: Optional[int] = None,
+    ) -> SwitchDesignRun:
+        """Design the binder against condition-specific protonation states.
+
+        Unlike :meth:`run_ph_redesign` (which pins protonated binder centres and favours
+        them in the complex), the conditions here name the state of any residue, binder
+        or receptor, at each pH, and the objective combines stability, potency and
+        switch terms (see ``mpnn.ph``). ``config`` is a ``SwitchDesignConfig`` or the
+        plain dict it is parsed from. ``seed``, when given, overrides ``config.base_seed``;
+        the search draws from ``base_seed + 1000 * run + seed_index``.
+
+        Not yet exercised end to end: the wiring below needs HBPLUS and atomworks. The
+        design core (``mpnn.ph``) and the glue helpers are unit-tested on synthetic data.
+        """
+        if not isinstance(config, SwitchDesignConfig):
+            config = SwitchDesignConfig.from_dict(config)
+        config = _with_seed(config, seed)
+        _check_propka_available(config)
+        logger.info("Protonation sources: %s.", _describe_protonation(config.protonation))
+        ctx = self._build_context(
+            atom_array, binder_chain, base_seed=config.base_seed, protonation=config.protonation
+        )
+        inputs = self._design_inputs(ctx, binder_chain, with_site_pka=_needs_site_pka(config))
+        return _run_switch_design(inputs, config)
+
+    @torch.no_grad()
+    def run_switch_design_ensemble(
+        self,
+        *,
+        structures: Dict[str, AtomArray],
+        binder_chain: str,
+        config,
+        seed: Optional[int] = None,
+    ) -> EnsembleRun:
+        """Design one binder against several target states, one complex per state.
+
+        ``structures`` maps a state name (for example ``"human"``, ``"mouse"``) to its
+        binder-plus-target complex; every complex must hold the same binder (same residues
+        and sequence) and, for the conditions' sites, the same residue numbering. The first
+        entry is the reference. ``seed``, when given, overrides ``config.base_seed``. Terms
+        are reduced over states by ``config.target_reduce``
+        (``max`` optimises the worst state). Like :meth:`run_switch_design`, not yet run end
+        to end on real structures.
+        """
+        if not isinstance(config, SwitchDesignConfig):
+            config = SwitchDesignConfig.from_dict(config)
+        config = _with_seed(config, seed)
+        _check_propka_available(config)
+        logger.info("Protonation sources: %s.", _describe_protonation(config.protonation))
+        inputs = {}
+        for name, atom_array in structures.items():
+            ctx = self._build_context(
+                atom_array, binder_chain, base_seed=config.base_seed, protonation=config.protonation
+            )
+            inputs[name] = self._design_inputs(
+                ctx, binder_chain, with_site_pka=_needs_site_pka(config)
+            )
+        return _run_switch_design_ensemble(inputs, config)
+
+    def _free_site_pka(self, ctx: "_PHContext", binder_chain: str) -> Dict[SiteKey, float]:
+        """PROPKA's reference pKa of every His, Asp and Glu, run on the free binder and on the
+        free receptor. The pKa shift that binding brings is not in these numbers: it comes from
+        the Potts energies of the linked-equilibrium model."""
+        from mpnn.transforms.propka_labeller import propka_site_pka
+
+        atoms = ctx.proc_atom_array
+        if atoms is None:
+            raise RuntimeError("The context carries no processed atom array.")
+        on_binder = np.array([str(c) == binder_chain for c in atoms.chain_id])
+        site_pka: Dict[SiteKey, float] = {}
+        for role, partner in (("binder", atoms[on_binder]), ("receptor", atoms[~on_binder])):
+            logger.info(
+                "Running PROPKA on the free %s (%d atoms) for the reference pKa.", role, len(partner)
+            )
+            for (chain, res_id), value in propka_site_pka(partner).items():
+                site_pka[SiteKey(chain, res_id)] = value
+        return site_pka
+
+    def _design_inputs(
+        self, ctx: "_PHContext", binder_chain: str, *, with_site_pka: bool = False
+    ) -> DesignInputs:
+        """Describe the featurised complex to ``mpnn.ph``: tokens, residues, 3 scorers."""
+        names = [str(ctx.encoding.idx_to_token[i]) for i in range(ctx.V)]
+        chain_ids = [str(c) for c in ctx.token_aa.chain_id]
+        res_ids = [int(r) for r in ctx.token_aa.res_id]
+        site_index = site_index_from_arrays(chain_ids, res_ids)
+        receptor_chains = sorted(set(chain_ids) - {binder_chain})
+        if binder_chain not in chain_ids or not receptor_chains:
+            raise ValueError(
+                f"Need the binder chain {binder_chain!r} and at least one other chain "
+                f"(chains present: {sorted(set(chain_ids))})."
+            )
+        binder_scorer, binder_positions = self._isolated_scorer(
+            ctx, [binder_chain], site_index
+        )
+        receptor_scorer, receptor_positions = self._isolated_scorer(
+            ctx, receptor_chains, site_index
+        )
+        return DesignInputs(
+            tokens=ctx.S_native,
+            table=TokenTable(names),
+            chain_ids=chain_ids,
+            res_ids=res_ids,
+            parents=parent_names(
+                names, ctx.canonical_map.tolist(), ctx.S_native.tolist()
+            ),
+            complex_scorer=PottsScorerAdapter(ctx.scorer),
+            binder_scorer=binder_scorer,
+            receptor_scorer=receptor_scorer,
+            binder_positions=binder_positions,
+            receptor_positions=receptor_positions,
+            partner_rank=knn_partner_rank(ctx.eidx_np),
+            neighbour_index=ctx.eidx_np,
+            site_pka=self._free_site_pka(ctx, binder_chain) if with_site_pka else None,
+        )
+
+    def _isolated_scorer(self, ctx: "_PHContext", chains, site_index):
+        """Re-encode ``chains`` alone: ``(scorer, complex positions in its order)``.
+
+        Mirrors :meth:`compute_g_bind`: removing the partner changes each chain's kNN
+        graph, so its energy is not a slice of the complex's. The protonation labeller
+        also runs on the isolated chain although its tokens are discarded (the complex's
+        tokens are used), which is wasteful but keeps the featurisation identical.
+        """
+        atoms = ctx.proc_atom_array
+        if atoms is None:
+            raise RuntimeError("The context carries no processed atom array.")
+        keep = np.isin(np.array([str(c) for c in atoms.chain_id]), list(chains))
+        if not keep.any():
+            raise ValueError(f"No atoms for chains {list(chains)}.")
+        vocab = getattr(self, "_vocab_name", None) or "v4"
+        batch = prepare_potts_input(
+            atoms[keep],
+            structure_noise=0.0,
+            extended_vocab=vocab,
+            protonation_classifier=ctx.protonation_classifier,
+        )
+        network_input = _to_device(batch["network_input"], self.device)
+        out = run_forward_compat(self.model, network_input)
+        isolated = batch["atom_array"]
+        token_isolated = isolated[get_token_starts(isolated)]
+        positions = positions_in_complex(
+            token_isolated.chain_id, token_isolated.res_id, site_index
+        )
+        scorer = PottsScorerAdapter(_PottsScorer(out["etab_out"], out["E_idx"]))
+        return scorer, positions
+
+    # ------------------------------------------------------------------ #
     # Public entrypoint
     # ------------------------------------------------------------------ #
     def run_ph_redesign(
@@ -1049,8 +1331,13 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
         seed: int = 0,
         initial_sequences: Optional[Sequence[str]] = None,
         n_jobs: int = 1,
+        protonation=None,
     ) -> PHDesignSet:
         """Featurise + forward ONCE, then run each criteria against the shared Potts tables.
+
+        ``protonation`` (a ``ProtonationSources`` or its dict) chooses where the input structure's
+        protonation states come from: EV6 by default, or ``{"states": "propka", "ph": ...}``.
+        Its ``reference_pka`` belongs to ``linked_equilibrium`` and is refused here.
 
         All criteria must share this engine's checkpoint/vocab; they may differ in method and
         knobs (the sweep). Returns a ``PHDesignSet`` (deduped, lowest energy first).
@@ -1064,7 +1351,14 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
         this backbone's featurised tables read-only (COW). CPU only; results are identical to the
         serial path (each design re-seeds its own RNG), just produced out of order then re-sorted.
         """
-        ctx = self._build_context(atom_array, binder_chain, base_seed=seed)
+        protonation = _as_protonation(protonation)
+        if protonation.reference_pka != "constant":
+            raise ValueError(
+                "protonation.reference_pka only applies to run_switch_design with the "
+                "linked_equilibrium binding model; run_ph_redesign has no pKa to set."
+            )
+        logger.info("Protonation sources: %s.", _describe_protonation(protonation))
+        ctx = self._build_context(atom_array, binder_chain, base_seed=seed, protonation=protonation)
         ctx.external_initial_sequences = list(initial_sequences) if initial_sequences else []
         # Score the ORIGINAL seeds (as supplied, no RES-P introduced) with the same featurised
         # tables — stability H + binder global protonation ΔH — so the seed energy is available for
@@ -1108,7 +1402,7 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
         out = PHDesignSet()
         try:
             with mp.get_context("fork").Pool(min(n_jobs, len(tasks)), initializer=_pool_init) as pool:
-                for sub in pool.imap_unordered(_pool_task, tasks):
+                for sub in pool.imap(_pool_task, tasks):   # ordered: same result list as the serial path
                     out.extend(sub)
         finally:
             _POOL_CTX = _POOL_ENGINE = _POOL_CRITERIA = None
@@ -1117,8 +1411,11 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
     # ------------------------------------------------------------------ #
     # Context: featurise once, expose design field + scorer + masks
     # ------------------------------------------------------------------ #
-    def _build_context(self, atom_array: AtomArray, binder_chain: str, *, base_seed: int = 0) -> "_PHContext":
+    def _build_context(
+        self, atom_array: AtomArray, binder_chain: str, *, base_seed: int = 0, protonation=None
+    ) -> "_PHContext":
         encoding = self.model.graph_featurization_module.TOKEN_ENCODING
+        classifier = _protonation_classifier(_as_protonation(protonation))
 
         # Featurise with the protonation-aware Potts pipeline (mpnn.potts_inference), NOT the
         # engine's _build_network_input — that one is wired to the standard mpnn pipeline which
@@ -1130,7 +1427,7 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
         _vocab = getattr(self, "_vocab_name", None) or "v4"
         batch = prepare_potts_input(
             atom_array, designed_chains=[binder_chain], structure_noise=0.0,
-            extended_vocab=_vocab,
+            extended_vocab=_vocab, protonation_classifier=classifier,
         )
         network_input = batch["network_input"]
         # prepare_potts_input builds tensors on the default device (CUDA when a GPU is visible),
@@ -1202,6 +1499,8 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
             chainA_t=chainA_t, binder_chain=binder_chain,
             network_input=network_input, base_seed=int(base_seed),
             region_masks=region_masks,
+            proc_atom_array=proc_atom_array,
+            protonation_classifier=classifier,
         )
 
     # ------------------------------------------------------------------ #
@@ -1371,7 +1670,7 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
             # focus on the interacting residues; [all] = whole chain).
             free = set(int(x) for x in ctx.chA_free_idx.tolist())
             if crit.placement_region and "all" not in crit.placement_region:
-                region = set(int(x) for x in ctx.region_mask(crit.placement_region).nonzero().flatten().tolist())
+                region = set(int(x) for x in ctx.region_mask(crit.placement_region, crit.interface_distance).nonzero().flatten().tolist())
                 free = free & region
             designable = sorted(free)
             if not designable:
@@ -1387,7 +1686,7 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
         if crit.center_types:
             # EXACT composition: place one distinct, best-ranked site per type (positions chosen by the
             # placement method within the region). Yields exactly ONE plan of that multiset.
-            region_idx = ctx.region_mask(crit.placement_region).nonzero().flatten()
+            region_idx = ctx.region_mask(crit.placement_region, crit.interface_distance).nonzero().flatten()
             if int(region_idx.numel()) < len(crit.center_types):
                 return []
             place = PlacementPlan.placement_fn(crit.placement_by)
@@ -1403,7 +1702,7 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
             plan = _finalize_plan(ctx, crit, pins)
             return [plan] if plan is not None else []
 
-        region_idx = ctx.region_mask(crit.placement_region).nonzero().flatten()
+        region_idx = ctx.region_mask(crit.placement_region, crit.interface_distance).nonzero().flatten()
         if int(region_idx.numel()) < crit.center_count:
             return []
         place = PlacementPlan.placement_fn(crit.placement_by)
@@ -1700,6 +1999,10 @@ class _PHContext:
     # per-ctx-position boolean masks (length L, True only on binder positions) for
     # {"interface","core","surface"}; empty when classification failed (fail-soft).
     region_masks: Dict[str, torch.Tensor] = field(default_factory=dict)
+    # processed atom array of the complex; lets chains be re-encoded alone (mpnn.ph)
+    proc_atom_array: Any = None
+    # the labeller that produced the tokens (None = the vocabulary's own); chains re-encoded alone use it too
+    protonation_classifier: Any = None
 
     def __post_init__(self) -> None:
         self.chA_free_idx = (self.free_mask & self.chainA_t).nonzero(as_tuple=False).squeeze(1)
@@ -1781,18 +2084,43 @@ class _PHContext:
                 m[i] = True
         return m
 
-    def region_mask(self, names: Sequence[str]) -> torch.Tensor:
+    def region_masks_at(self, interface_distance: float) -> Dict[str, torch.Tensor]:
+        """Region masks for an interface cutoff in angstroms; each distinct cutoff is computed once.
+
+        The default cutoff comes from ``_build_context``; others re-run the geometry on the
+        processed atom array the context keeps."""
+        distance = round(float(interface_distance), 6)
+        if distance == DEFAULT_INTERFACE_DISTANCE:
+            return self.region_masks
+        cache = self.__dict__.setdefault("_region_cache", {})
+        if distance not in cache:
+            if self.proc_atom_array is None:
+                raise RuntimeError("The context carries no processed atom array.")
+            cache[distance] = _binder_region_masks(
+                self.proc_atom_array, self.token_aa, self.binder_chain, self.chainA_t,
+                self.device, self.L, interface_dist=distance)
+        return cache[distance]
+
+    def region_mask(self, names: Sequence[str], interface_distance: Optional[float] = None) -> torch.Tensor:
         """OR of the requested region masks ∩ free binder positions. 'all' (or empty / unknown names)
         -> all free binder positions."""
         free = self.free_mask & self.chainA_t
         if not names or "all" in names:
             return free.clone()
+        masks = (self.region_masks if interface_distance is None
+                 else self.region_masks_at(interface_distance))
         base = torch.zeros(self.L, dtype=torch.bool, device=self.device)
         for n in names:
-            m = self.region_masks.get(n)
+            m = masks.get(n)
             if m is not None:
                 base = base | m
-        return base & free
+        region = base & free
+        if not bool(region.any()):
+            logger.warning(
+                "placement_region %s selects no free binder position (interface_distance=%s); "
+                "no placement site can be found",
+                list(names), interface_distance if interface_distance is not None else DEFAULT_INTERFACE_DISTANCE)
+        return region
 
     def binder_pos_of_res_id(self, res_id: int) -> int:
         pos = self.res_id_to_pos.get(int(res_id))
@@ -2715,8 +3043,10 @@ def _global_protonation_dH(ctx, seq) -> Optional[float]:
     """Binder pH-response: H(all binder titratable -> protonated) - H(-> deprotonated).
 
     Neutral His = mean over {HID, HIE} (v3/v4 tautomers) or the single HIS-S token (v6). Lower =
-    prefers protonated / low-pH-favoured; higher (positive) = prefers deprotonated / neutral (our
-    goal). Returns None if the vocab lacks the needed microstates.
+    the binder prefers its titratable residues protonated; higher = deprotonated/neutral. Block
+    descent MINIMISES this term when ``global_weight`` > 0 (so a positive weight pushes toward
+    protonation); the sign of the weight sets the direction. Returns None if the vocab lacks the
+    needed microstates.
     """
     t2i = ctx.encoding.token_to_idx
     base_needed = ("HIS-P", "ASP-P", "ASP-D", "GLU-P", "GLU-D")

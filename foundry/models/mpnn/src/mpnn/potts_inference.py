@@ -108,7 +108,8 @@ def _get_potts_pipeline(device, build_bond_labels: bool = False, hbond_scope: st
                         extended_vocab: str = "v4",
                         use_salt_bridge: bool = True,
                         deterministic: bool = True,
-                        protonation_seed: int | None = None):
+                        protonation_seed: int | None = None,
+                        protonation_classifier=None):
     """Cache the (structure-independent) Potts featurization pipeline by device.
 
     The build args don't depend on the input structure, so rebuilding it on every call only
@@ -119,9 +120,12 @@ def _get_potts_pipeline(device, build_bond_labels: bool = False, hbond_scope: st
     ``build_bond_labels=True`` also persists the HBPLUS / PLIP ground-truth bonds as the E_idx-alignable
     ``hbond_donates_to`` / ``hbond_accepts_from`` / ``salt_partners`` token-pair partner lists (the
     annotation is already computed for protonation labelling; this just keeps it).
+
+    ``protonation_classifier`` (hashable, e.g. a frozen PropkaLabeller) is part of the key: a pipeline
+    built with one labeller must never be reused for another.
     """
     key = (str(device), bool(build_bond_labels), str(hbond_scope), str(extended_vocab),
-           bool(use_salt_bridge), bool(deterministic), protonation_seed)
+           bool(use_salt_bridge), bool(deterministic), protonation_seed, protonation_classifier)
     if key not in _PIPELINE_CACHE:
         _PIPELINE_CACHE[key] = build_mpnn_transform_pipeline(
             model_type="potts_mpnn", is_inference=True, minimal_return=True, device=device,
@@ -129,6 +133,7 @@ def _get_potts_pipeline(device, build_bond_labels: bool = False, hbond_scope: st
             extended_vocab=extended_vocab,
             use_salt_bridge=use_salt_bridge,
             deterministic=deterministic, protonation_seed=protonation_seed,
+            protonation_classifier=protonation_classifier,
         )
     return _PIPELINE_CACHE[key]
 
@@ -150,6 +155,9 @@ def prepare_potts_input(
     use_salt_bridge: bool = True,    # PLIP salt-bridge proximity prior (both vocabularies support it).
     deterministic: bool = True,      # False -> SAMPLE ambiguous roles + symmetric shared-proton dyads.
     protonation_seed: int | None = None,  # seed the sampling; None -> fresh each call
+    protonation_classifier=None,     # a labeller to use instead of the vocabulary's (PropkaLabeller); its
+                                     # tokens must belong to extended_vocab. Without bond labels it also
+                                     # skips the H-bond pass, so HBPLUS is not needed.
 ) -> dict:
     """Featurize a PDB/CIF file or AtomArray.
 
@@ -189,7 +197,8 @@ def prepare_potts_input(
 
     pipeline = _get_potts_pipeline(device, build_bond_labels=build_bond_labels, hbond_scope=hbond_scope,
                                    extended_vocab=extended_vocab, use_salt_bridge=use_salt_bridge,
-                                   deterministic=deterministic, protonation_seed=protonation_seed)
+                                   deterministic=deterministic, protonation_seed=protonation_seed,
+                                   protonation_classifier=protonation_classifier)
     pipeline_out = pipeline({
         "atom_array":         inf.atom_array.copy(),
         "structure_noise":    inf.input_dict["structure_noise"],

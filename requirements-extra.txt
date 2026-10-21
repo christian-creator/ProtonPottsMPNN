@@ -27,5 +27,8 @@ nbconvert>=7
 nbformat>=5
 jupyterlab>=4
 
-# --- protonation annotation for Potts training/precompute (training/) ---
-propka>=3.5           # imported at module load by mpnn.pipelines.potts_mpnn (pka_annotation)
+# --- OPTIONAL, not installed by install.sh ---
+# PROPKA is only used when you ask for it: protonation.states = "propka" (starting states) and
+# protonation.reference_pka = "propka" (pKa of the named sites), and the training-time pKa annotation.
+# Without it those paths stop with a message that says how to install it:  uv pip install propka
+# propka>=3.5
