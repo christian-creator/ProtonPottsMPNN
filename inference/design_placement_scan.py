@@ -6,7 +6,7 @@ scan (higher = substitution is costly). A star marks each state's top-1 placemen
 every residue by structural class (interface / core / surface).
 
 This is `example_placement_scores.py`, as a function the design notebook calls for its example binder.
-Run standalone on the packaged example:  python placement/design_placement_scan.py
+Run standalone on the packaged example:  python inference/design_placement_scan.py
 """
 import numpy as np
 
@@ -141,7 +141,8 @@ if __name__ == "__main__":
         extended_vocab="v6", out_directory=None, write_fasta=False, write_structures=False)
     aa = PDBFile.read(str(PKG / "inference" / "examples" / meta["pdb"])).get_structure(model=1)
     fig, top = plot_design_placement(eng, aa, meta["binder_chain"])
-    out = PKG / "placement" / "design_placement_scan.png"
+    out = PKG / "inference" / "outputs" / "design_placement_scan.png"
+    out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=300, bbox_inches="tight")
     for stt, (rid, c, sc) in top.items():
         print(f"  {stt:6s} top placement: res {rid:4d}  class={c:9s}  score={sc:.3f}")
