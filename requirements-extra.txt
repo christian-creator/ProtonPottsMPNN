@@ -1,5 +1,13 @@
-# Extra Python deps NOT already declared by foundry/pyproject.toml (rc-foundry).
+# Extra Python deps NOT already declared by foundry/pyproject.toml (rc-foundry), plus upper bounds
+# for two that are declared there without one.
 # Install AFTER `pip install -e foundry`.  See the "Install" section of README.md.
+
+# atomworks 3.0 (released 2026-10-05) rejects an atom array that carries no `charge` annotation, which
+# breaks the structure pipeline the design engine featurises through -- so inference/design_ph.py fails
+# on a fresh install. foundry/pyproject.toml asks only for `atomworks[ml]>=2.1.1` (no upper bound), so
+# a new resolution takes 3.x; this code was written and tested against the 2.x series.
+# Reported by @SimonCrouzet in PR #6.
+atomworks[ml]>=2.1.1,<3
 
 # pandas 3.0 defaults to Arrow-backed strings, which FLAML 2.6 can't index (ArrowStringArray has no .iloc);
 # pin to the 2.x series the model was developed with.
