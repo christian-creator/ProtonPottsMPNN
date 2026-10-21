@@ -1341,12 +1341,6 @@ class PottsMPNNPHEngine(MPNNInferenceEngine):
         ``center_protonation_types``, to compare like with like; the number says what selective gap
         the NATIVE sequence context already afforded at those sites, before the redesign.
 
-        NOTE therefore that ``selective_energy`` is measured on the native sequence WITH the centres
-        substituted in -- it is not a property of whatever native residues occupy those positions
-        (a RES-P-vs-RES-D gap is undefined without placing those tokens). Only
-        ``final_potts_energy`` and ``canonical_sequence`` describe the untouched native sequence.
-        Callers that surface both next to each other should label them accordingly.
-        ``selective_energy`` is None when ``centers`` is empty.
         """
         binder_idx = ctx.chainA_all_idx.tolist()
         seq = ctx.S_native
