@@ -105,6 +105,15 @@ def _make_token_idx_tensor(
 
 # ── Model loading ─────────────────────────────────────────────────────────────
 
+def vocab_features(extended_vocab: str | None) -> "PottsProteinFeatures":
+    """The featuriser for a vocabulary name: 30 tokens for v6, 32 for v3/v4. A checkpoint only loads
+    into a model of its own vocabulary, so this must match the checkpoint, not default to 32.
+    ``None`` keeps the default (32-token) featuriser."""
+    if not extended_vocab:
+        return PottsProteinFeatures()
+    return PottsProteinFeatures(token_encoding=get_vocab(extended_vocab)["token_encoding"])
+
+
 def load_model(ckpt_path: Path, device: str, extended_vocab: str | None = None) -> tuple["PottsMPNN", int]:
     """Load a checkpoint, sizing the featuriser to the checkpoint's OWN vocabulary.
 
@@ -126,10 +135,7 @@ def load_model(ckpt_path: Path, device: str, extended_vocab: str | None = None) 
             "vocabularies is out of distribution; re-run with --extended_vocab "
             f"{ckpt_vocab!r}.")
     vocab_name = str(ckpt_vocab) if ckpt_vocab else extended_vocab
-    if vocab_name:
-        feats = PottsProteinFeatures(token_encoding=get_vocab(vocab_name)["token_encoding"])
-    else:
-        feats = PottsProteinFeatures()
+    feats = vocab_features(vocab_name)
     model = PottsMPNN(
         graph_featurization_module=feats,
         etab_source=PottsMPNN.infer_etab_source(ckpt["model"]),
@@ -693,7 +699,7 @@ def main() -> None:
     # epoch 0 = untrained network; trained checkpoints are shifted to epoch N+1
     # so the x-axis reads "epochs of training completed".
     print("Evaluating random-init baseline (epoch = 0)…", flush=True)
-    random_model = PottsMPNN(graph_featurization_module=PottsProteinFeatures())
+    random_model = PottsMPNN(graph_featurization_module=vocab_features(args.extended_vocab))
     random_model.apply(random_model.init_weights)
     random_model.eval()
     random_model = random_model.to(args.device)

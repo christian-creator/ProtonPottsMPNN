@@ -7,7 +7,7 @@ Sources (intended-target folds only; the *_RF3_output off-target specificity pan
   - bindcraft    : structures TBD (not in MB_benchmark/data) — plugs in once BINDCRAFT_DIR is set.
 
   # one shard:
-  SHARD_ID=0 NUM_SHARDS=8 PYTHONPATH=. HBPLUS_PATH=/novo/users/cpjb/tools/hbplus/hbplus \
+  SHARD_ID=0 NUM_SHARDS=8 PYTHONPATH=. HBPLUS_PATH=/path/to/hbplus \
       ./dpo_potts/bin/python sandbox/gbind/mb_gbind_score.py
   # smoke a few of one source:
   ... sandbox/gbind/mb_gbind_score.py --source metaanalysis --shard 0 --num-shards 1 --limit 5

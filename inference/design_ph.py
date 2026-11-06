@@ -58,7 +58,7 @@ print(f"example: {META['pdb_id']}  binder chain {BINDER_CHAIN}  binder_len {META
 from mpnn.inference_engines.potts_mpnn_ph import PottsMPNNPHEngine, PHDesignCriteria
 
 engine = PottsMPNNPHEngine(
-    checkpoint_path=str(CKPT), extended_vocab="v6",
+    checkpoint_path=str(CKPT), extended_vocab="v6", device="cpu",
     out_directory=None, write_fasta=False, write_structures=False,
 )
 atom_array = PDBFile.read(str(PDB)).get_structure(model=1)

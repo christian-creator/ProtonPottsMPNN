@@ -16,11 +16,9 @@ from __future__ import annotations
 
 import argparse
 import gc
-import os
 import time
 from pathlib import Path
 
-os.environ.setdefault("HBPLUS_PATH", "/novo/users/cpjb/tools/hbplus/hbplus")
 gc.disable()   # atomworks leaks cyclic garbage each iteration; the periodic sweep can stall the loop ~100s
 
 import pandas as pd

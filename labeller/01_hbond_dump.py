@@ -34,7 +34,8 @@ import pandas as pd
 import biotite.structure as struc
 from biotite.structure.io.pdb import PDBFile
 
-HBPLUS = os.environ.get("HBPLUS_PATH", "/novo/users/cpjb/tools/hbplus/hbplus")
+HBPLUS = os.environ.get("HBPLUS_PATH") or sys.exit(
+    "set HBPLUS_PATH=/path/to/hbplus (see the README, section 'Getting HBPLUS')")
 _PKG = Path(__file__).resolve().parent
 DATA = _PKG / "data"; DATA.mkdir(exist_ok=True)
 TRAIN_DF = os.environ.get("PROTON_TRAIN_DF", str(_PKG.parent / "data/mpnn_split/train_df_filtered.parquet"))

@@ -27,11 +27,9 @@ from __future__ import annotations
 
 import argparse
 import gc
-import os
 import time
 from pathlib import Path
 
-os.environ.setdefault("HBPLUS_PATH", "/novo/users/cpjb/tools/hbplus/hbplus")
 gc.disable()   # atomworks/biotite leak cyclic garbage; the periodic sweep can stall the loop (see build_snapshots)
 
 import numpy as np

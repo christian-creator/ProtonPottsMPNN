@@ -13,7 +13,7 @@ MICROSTATE MATCH = fraction of the design's pinned centres whose re-predicted la
 CPU only (HBPLUS + FLAML); FLAML is fork-unsafe → one process per shard, serial. RF3 cifs carry NaN
 b-factors that break HBPLUS's PDB write, so each fold is cleaned to a temp PDB first.
 
-  SMOKE:  LIMIT=1 HBPLUS_PATH=/novo/users/cpjb/tools/hbplus/hbplus PYTHONPATH=. ./dpo_potts/bin/python sandbox/pdbval/annotate_denovo_folds.py
+  SMOKE:  LIMIT=1 HBPLUS_PATH=/path/to/hbplus PYTHONPATH=. ./dpo_potts/bin/python sandbox/pdbval/annotate_denovo_folds.py
   SHARD:  NUM_SHARDS=40 SHARD_ID=i ... (writes pdbval_denovo_phannot_shard{i}.parquet; then --aggregate)
 """
 import glob
@@ -39,6 +39,11 @@ SHARD_ID = int(os.environ.get("SHARD_ID", "0"))
 NUM_SHARDS = int(os.environ.get("NUM_SHARDS", "1"))
 LIMIT = int(os.environ.get("LIMIT", "0"))
 _HIS, _ACID = {"HIS"}, {"ASP", "GLU"}
+
+
+def _np(x):
+    """A NumPy array from a tensor on any device (the features sit on the GPU when one is visible)."""
+    return x.detach().cpu().numpy() if hasattr(x, "detach") else np.asarray(x)
 
 
 def _clean_to_pdb(cif):
@@ -92,8 +97,8 @@ def annotate(cif, binder_len, centers):
             "-- pass the binder_len that matches this fold")
     is_binder = (chain == binder_ch)
 
-    hb = _edges(np.asarray(ni["hbond_donates_to"]).squeeze(0)) | _edges(np.asarray(ni["hbond_accepts_from"]).squeeze(0))
-    sb = _edges(np.asarray(ni["salt_partners"]).squeeze(0))
+    hb = _edges(_np(ni["hbond_donates_to"]).squeeze(0)) | _edges(_np(ni["hbond_accepts_from"]).squeeze(0))
+    sb = _edges(_np(ni["salt_partners"]).squeeze(0))
 
     def _count(edges, cls):
         n = 0
@@ -113,8 +118,8 @@ def annotate(cif, binder_len, centers):
     # pH-GATED bonds at the pinned CENTRES (bi-directional, state-specific): the H-bonds the centre's TARGET
     # protonation state uniquely enables — protonated (HIS-P/ASP-P/GLU-P) → the titratable proton DONATES;
     # neutral His (HIS-S) → the lone pair ACCEPTS (lost on protonation). Partner unrestricted (Thr/acid/…).
-    don = np.asarray(ni["hbond_donates_to"]).squeeze(0)
-    acc = np.asarray(ni["hbond_accepts_from"]).squeeze(0)
+    don = _np(ni["hbond_donates_to"]).squeeze(0)
+    acc = _np(ni["hbond_accepts_from"]).squeeze(0)
     tok_at = {int(rd): t for t, (ch, rd) in enumerate(zip(chain, resid)) if ch == binder_ch}
     gated = []
     for rid, pt in centers:

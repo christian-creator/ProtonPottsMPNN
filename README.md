@@ -36,12 +36,19 @@ The project has two halves, and this folder is self-contained for both:
 cd ProtonPottsMPNN
 ./install.sh                     # uv venv (Python 3.12) + uv pip install -e ./foundry + extras
 source .venv/bin/activate
+
+# or put the venv elsewhere (say, off a nearly full disk):
+VENV_DIR=~/venvs/ppm ./install.sh
+source ~/venvs/ppm/bin/activate
 ```
 
 `install.sh` runs `uv venv --clear` then a single `uv pip install -e ./foundry -r requirements-extra.txt`
 (the one resolution keeps both the foundry core — torch, lightning, atomworks[ml] — and the extras — the
 FLAML stack, jupyter, propka), verifies `import mpnn` resolves inside this folder, and registers the venv as
-a Jupyter kernel `ProtonPottsMPNN (.venv)`. Scripts just `import mpnn`; there are no `sys.path` hacks.
+a Jupyter kernel `ProtonPottsMPNN (venv)`. Scripts just `import mpnn`; there are no `sys.path` hacks. A `VENV_DIR`
+that already exists is replaced only with `./install.sh --clear`, since uv would delete whatever it holds.
+`atomworks` is kept below 3, because version 3.0 rejects atom arrays without a `charge` annotation and the
+structure pipeline fails on it.
 
 - **Python 3.12** is required (`mpnn`/`foundry` pin `>=3.12,<3.13`).
 - **HBPLUS** is an external C binary (not pip-installable) used to read H-bond geometry. Point
@@ -49,7 +56,8 @@ a Jupyter kernel `ProtonPottsMPNN (.venv)`. Scripts just `import mpnn`; there ar
   point that featurises a structure — the labeller, the fold scoring **and the design engine**: the
   engine's `_build_context` calls the same `prepare_potts_input` pipeline, whose `CalculateHbondsPlus`
   stage shells out to HBPLUS to produce the protonation labels. Only the pure read-only paths
-  (loading a checkpoint, re-scoring a shipped parquet) run without it.
+  (loading a checkpoint, re-scoring a shipped parquet) run without it. *Getting HBPLUS* below says where
+  to get it and how to check the build.
 - Let the install finish uninterrupted — a killed `uv pip install` can leave the venv half-written (package
   metadata present, module files missing). If imports fail oddly, repair in place with
   `uv pip install --python .venv/bin/python --reinstall -e ./foundry -r requirements-extra.txt`.
@@ -57,10 +65,29 @@ a Jupyter kernel `ProtonPottsMPNN (.venv)`. Scripts just `import mpnn`; there ar
 | part | needs mpnn/torch | needs HBPLUS | needs FLAML stack | needs external oracle weights |
 |------|:---:|:---:|:---:|:---:|
 | **label a PDB** (`labeller/`) | ✅ | ✅ | ✅ | — |
-| **design a binder** (`inference/`) | ✅ | ✅ (featurisation) | — | — |
+| **design a binder** (`inference/`) | ✅ | ✅ | ✅ | — |
 | **score a fold** (`scoring/`) | ✅ | ✅ (pH-bonds) | — | — |
 | **benchmarks** (`benchmarks/`) | ✅ | — | — | ProteinMPNN arm only |
 | **train** (`training/`, reference) | ✅ | ✅ | — | — |
+
+### Getting HBPLUS
+
+HBPLUS (McDonald & Thornton, *J Mol Biol* 238:777, 1994) is a C program for hydrogen-bond geometry, written
+at UCL and distributed by the Thornton group at EMBL-EBI. It is not on PyPI or conda. The structure pipeline
+runs it on **every** structure it featurises (`prepare_potts_input`), so the design engine needs it as well as
+the labeller and the fold scoring.
+
+1. Get `hbplus.tar.gz` from the [EBI download page](https://www.ebi.ac.uk/thornton-srv/software/HBPLUS/download.html)
+   or the copy in [RomanLas/HBPLUS](https://github.com/RomanLas/HBPLUS). The archive carries a confidentiality
+   agreement (`confid.txt`): use for your own research, and cite the paper above. Do not commit the source or the
+   binary to this repository.
+2. `tar -xzf hbplus.tar.gz && cd hbplus && make` (needs `gcc`; version 3.2 compiles with warnings only).
+3. `export HBPLUS_PATH=/absolute/path/to/hbplus/hbplus` — the executable itself, not its directory.
+4. Check it on the shipped example: in a scratch directory,
+   `cp inference/examples/pdl1_seed_binder.pdb x.pdb && "$HBPLUS_PATH" -h 2.5 -d 3.5 x.pdb x.pdb | tail -1`
+   ends with `181 hydrogen bonds found.`
+
+A missing, mistyped or non-executable `HBPLUS_PATH` stops the run with a message that says which of these it is.
 
 ---
 
@@ -115,7 +142,7 @@ internal design campaigns.
 
 ```bash
 python inference/design_ph.py       # -> inference/outputs/ (see below)
-# interactively:  jupyter lab inference/design_ph.ipynb   (pick the "ProtonPottsMPNN (.venv)" kernel)
+# interactively:  jupyter lab inference/design_ph.ipynb   (pick the "ProtonPottsMPNN (venv)" kernel)
 ```
 ```python
 from mpnn.inference_engines.potts_mpnn_ph import PottsMPNNPHEngine, PHDesignCriteria
@@ -162,11 +189,16 @@ order). Two designs that share an id but differ in sequence are both kept, the s
 **Fold the Pareto designs.** It then picks `N_FOLD` designs off the Pareto front and folds each with the
 **packaged RF3 engine** (`fold_rf3.py`, from_target templating: the target chain is templated, the binder is
 folded from its designed sequence), scoring charge clashes + pH-sensitive H-bonds at the pinned centres. RF3
-**code** ships here, but the **weights (~3 GB) do not** — set `RF3_CKPT=/abs/rf3_*.ckpt` and run on a **GPU**
-(with the RF3 atom-embedding cache) to fold. This path was **exercised end-to-end** (input build → checkpoint
-load → RF3 forward → a 2-chain binder+target `.cif`) with an internal checkpoint; on a GPU node with the
-embedding cache it produces a physical fold. Without RF3 the notebook still runs: it **exports** the selected
-designs (`pareto_fold_manifest.json`) ready to fold elsewhere and scores a shipped real RF3 fold as the demo.
+**code** ships here, but the **weights (3.04 GB) do not**. `foundry install rf3 --checkpoint-dir DIR` fetches
+`rf3_foundry_01_24_latest_remapped.ckpt`; check its size (3,038,876,446 bytes), because on a slow connection the
+installer reported success after writing 0.5 MB, and `curl -C - -o … https://files.ipd.uw.edu/pub/rf3/rf3_foundry_01_24_latest_remapped.ckpt`
+resumes such a download. Then set `RF3_CKPT=DIR/rf3_foundry_01_24_latest_remapped.ckpt` and keep a **GPU** visible
+(`design_ph.py` designs on the CPU either way and uses the GPU only for the fold). This path was **exercised
+end-to-end** (input build → checkpoint load → RF3 forward → a 2-chain binder+target `.cif` → clash and pH-bond
+scores) on an RTX 3070 with 8 GB: the example binder folds in about 2 to 3 minutes per design (pLDDT 0.8 at 3
+recycles and 20 steps), with no atom-embedding cache set up. Without RF3 the notebook still runs: it **exports**
+the selected designs (`pareto_fold_manifest.json`) ready to fold elsewhere and scores a shipped real RF3 fold as
+the demo.
 
 **Every design is saved with its protonation states.** Outputs in `inference/outputs/`:
 
@@ -369,7 +401,7 @@ skipped when atomworks, one of those, or the checkpoint is missing.
 | [`labeller/`](labeller/) | the FLAML protonation labeller: `label_pdb.py` (example above), the train path `01…05_*.py`, `pr_curve.py` (AUPR), and the trained models. |
 | [`inference/`](inference/) | `design_ph.ipynb` / `.py` (example above) + `design_placement_scan.py` (the engine's per-design placement plot) + `fold_rf3.py` (fold a design with the packaged RF3 engine; needs `RF3_CKPT` + GPU) + `design_switch.py` (switch design from the command line) + `examples/` (a PD-L1 seed binder + a real RF3 fold). |
 | [`scoring/`](scoring/) | fold read-outs: `charge_clash` (geometry) + `annotate` (pH-sensitive H-bonds / salt bridges via HBPLUS+PLIP). `score_example.py` is a runnable demo. |
-| [`benchmarks/`](benchmarks/) | PKAD (pKa), MegaScale/FireProt (stability), binding AP, within-backbone, and `placement_by_class.py` (library-wide placement propensity) — all data in-folder. |
+| [`benchmarks/`](benchmarks/) | PKAD (pKa), MegaScale/FireProt (stability), binding AP, within-backbone and `placement_by_class.py` (library-wide placement propensity). The data of all but within-backbone and `placement_by_class.py` is in-folder (see below). |
 | [`training/`](training/) | PottsMPNN + H-bond-head SLURM launchers — **reference** (cluster-specific; the trainer itself is `mpnn.train`). |
 | [`checkpoints/`](checkpoints/) | the v6 design checkpoint (21 MB). |
 
@@ -395,15 +427,20 @@ skipped when atomworks, one of those, or the checkpoint is missing.
 | **labeller AUPR** | `python labeller/pr_curve.py` | `labeller/{his,acid}_pr.png` (AP HIS 0.70, acids 0.33) |
 | **score a fold** | `HBPLUS_PATH=… python scoring/score_example.py` | pH-bond / charge-clash counts |
 | **placement by class** (library-wide) | `python benchmarks/placement_by_class.py` | `benchmarks/placement_by_class.png` |
-| **pKa benchmark** | `PROTON_ROOT=$PWD python -m mpnn.scripts.eval_pkad --ckpt_dir checkpoints/potts_v6_afdb_edge_his0.3_acid0.06 --extended_vocab v6 --output_dir benchmarks/results` | `pkad_*.csv` + scatter |
+| **pKa benchmark** | `python -m mpnn.scripts.eval_pkad --ckpt_dir checkpoints/potts_v6_afdb_edge_his0.3_acid0.06 --pkad_csv benchmarks/data/PKAD/PKAD-R-v1.0_2026-04-22T16_0755.441Z.csv --pdb_dir benchmarks/data/PKAD/pdb_cache --extended_vocab v6 --output_dir DIR` | `pkad_*.csv` + scatter in `DIR` |
 | **stability benchmark** | `EV6_OUT_SUBDIR=his0.3_acid0.06 python benchmarks/stability_benchmark.py` | ΔΔG CSVs (GPU recommended) |
 | **3-way bar plot** | `EV6_OUT_SUBDIR=his0.3_acid0.06 python benchmarks/benchmark_barplot.py` | recovery + MegaScale + FireProt figure |
 | **binding AP** | `python benchmarks/binding_ap.py` | `benchmarks/results/summary_global_ap.png` |
 | **within-backbone** | `python benchmarks/within_backbone.py` | `within_backbone_inverse_outcomes.png` |
 
-Benchmark scripts derive the package root from their location (override with `PROTON_ROOT=/abs/path`). The
-model-quality benchmarks (PKAD, stability) compute from raw structures; the design benchmarks (binding,
-within-backbone) read shipped parquets (regenerating them needs the Boltz-2 / RF3 oracles).
+Benchmark scripts derive the package root from their location (override with `PROTON_ROOT=/abs/path`), except
+`eval_pkad`, whose default paths point outside this repository: pass the flags above, including
+`--extended_vocab v6` for the shipped checkpoint (the default `v4` builds a 32-token model and the weight load
+fails). On the 105 usable PKAD structures it takes about 8 minutes on a CPU. The model-quality benchmarks (PKAD,
+stability) compute from raw structures. Of the design benchmarks only binding AP reads a shipped parquet
+(`mb_gbind_benchmark.parquet`); `within_backbone.py` needs `egfr_pdl1_*.parquet`, `optimized_sweep_scores.parquet`
+and `curated_designs.parquet`, and `placement_by_class.py` needs `data/placement_scan.parquet`. None of those is in
+the repo, and regenerating them needs the Boltz-2 / RF3 oracles.
 
 ---
 

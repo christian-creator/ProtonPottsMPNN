@@ -179,6 +179,34 @@ def check_atom_array_has_hydrogen(data: dict[str, Any]):
         raise ValueError("Key `atom_array` in data has no hydrogens.")
 
 
+def hbplus_executable() -> str:
+    """Absolute path of the HBPLUS executable that ``HBPLUS_PATH`` names.
+
+    HBPLUS (McDonald & Thornton, J. Mol. Biol. 238:777, 1994) is an external program, not a
+    Python package. The structure pipeline runs it on every structure it featurises, so the
+    design engine needs it as well as the labeller. The path is made absolute here because
+    the program is started in a temporary working directory.
+    """
+    path = os.environ.get("HBPLUS_PATH", "").strip()
+    if not path:
+        raise ValueError(
+            "HBPLUS_PATH is not set. The structure pipeline runs HBPLUS, an external program, "
+            "on every structure. Build it and point HBPLUS_PATH at the executable "
+            "(export HBPLUS_PATH=/path/to/hbplus); see the README, section 'Getting HBPLUS'."
+        )
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"HBPLUS_PATH points to {path}, which is not a file. It must name the hbplus "
+            "executable itself, not the directory that holds it."
+        )
+    if not os.access(path, os.X_OK):
+        raise PermissionError(
+            f"HBPLUS_PATH points to {path}, which is not executable (try chmod +x)."
+        )
+    return path
+
+
 def calculate_hbonds(
     atom_array: AtomArray,
     # HBPLUS's own defaults are D-A 3.9, H-A 2.5, DHA >= 90 deg. We tighten D-A to 3.5 but must NOT
@@ -285,28 +313,7 @@ def calculate_hbonds(
                     merged[key] = dict(item)
         return list(merged.values())
 
-    # HBPLUS is an external C binary; it must be pointed at explicitly.
-    # There used to be a fallback to a hardcoded developer laptop path
-    # ("/Users/chrjac/Library/CloudStorage/OneDrive-.../tools/hbplus/hbplus") between these two
-    # blocks, which made the check below unreachable: with HBPLUS_PATH unset, every caller failed
-    # with a FileNotFoundError naming someone else's macOS home instead of the actionable message.
-    hbplus_exe = os.environ.get("HBPLUS_PATH", "").strip()
-
-    if not hbplus_exe:
-        raise ValueError(
-            "HBPLUS_PATH environment variable not set. "
-            "Please set it to the path of the hbplus executable in order to calculate hydrogen bonds."
-        )
-    # Resolve before checking, so a relative HBPLUS_PATH is reported (and executed) as the absolute
-    # path it actually means. isfile, not exists: a DIRECTORY passes exists() and would otherwise fail
-    # later inside subprocess with a far less obvious error.
-    hbplus_exe = os.path.abspath(hbplus_exe)
-    if not os.path.isfile(hbplus_exe):
-        raise FileNotFoundError(
-            f"HBPLUS_PATH={hbplus_exe!r} is not a file. Point it at your hbplus build "
-            "(an external C binary, not pip-installable)."
-        )
-
+    hbplus_exe = hbplus_executable()
 
     # save_atomarray_to_pdb remaps chain_id based on chain_iid (needed to write
     # a valid PDB file for hbplus), but we must not let that mutation leak into
