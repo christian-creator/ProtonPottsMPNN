@@ -66,9 +66,14 @@ structure pipeline fails on it.
 |------|:---:|:---:|:---:|:---:|
 | **label a PDB** (`labeller/`) | ✅ | ✅ | ✅ | — |
 | **design a binder** (`inference/`) | ✅ | ✅ | ✅ | — |
-| **score a fold** (`scoring/`) | ✅ | ✅ (pH-bonds) | — | — |
+| **score a fold** (`scoring/`) | ✅ | ✅ (pH-bonds) | ✅ (pH-bonds) | — |
 | **benchmarks** (`benchmarks/`) | ✅ | — | — | ProteinMPNN arm only |
-| **train** (`training/`, reference) | ✅ | ✅ | — | — |
+| **train** (`training/`, reference) | ✅ | ✅ | ✅ (building snapshots) | — |
+
+FLAML is needed wherever a structure is featurised with the `v6` vocabulary: `prepare_potts_input` runs the
+deployed labeller (`transforms/ev6/`, five pickled FLAML models per residue class) to assign each titratable
+residue its protonation token. That includes the design engine's `_build_context`. In `scoring/`, only the 
+geometric charge-clash and salt-bridge read-outs run without FLAML.
 
 ### Getting HBPLUS
 
