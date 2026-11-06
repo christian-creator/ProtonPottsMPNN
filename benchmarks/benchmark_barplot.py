@@ -17,11 +17,11 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
 # EV6_OUT_SUBDIR selects WHICH benchmarked model to plot; the figure is written with a matching suffix
-# so each model gets its own file rather than overwriting the baseline's. Unset = the original
-# v6_afdb_edge run -> benchmark_3way.png, exactly as before.
+# so each model gets its own file. Unset = the shipped checkpoint (his0.3_acid0.06), the same default as
+# stability_benchmark.py, so a plain run reads and overwrites the tracked results.
 import os
 BASE = Path(os.environ.get("PROTON_ROOT", Path(__file__).resolve().parents[1])) / "benchmarks/results"
-SUBDIR = os.environ.get("EV6_OUT_SUBDIR", "")
+SUBDIR = os.environ.get("EV6_OUT_SUBDIR", "his0.3_acid0.06")
 OUT = BASE / SUBDIR
 FIG = BASE / (f"benchmark_3way_{SUBDIR}.png" if SUBDIR else "benchmark_3way.png")
 REC, MEGA, FIRE = OUT / "val_recovery_all.csv", OUT / "stability_megascale_summary.csv", OUT / "stability_fireprot_summary.csv"

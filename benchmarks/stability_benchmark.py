@@ -35,7 +35,9 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 EXTENDED_VOCAB = os.environ.get("EV6_VOCAB", "v6")   # MUST match EV6_MODEL_DIR's checkpoint: it sizes the token encoding AND labels the features
 POTTS_CKPT = Path(os.environ.get("POTTS_CKPT", _P / "checkpoints/potts_v6_afdb_edge_his0.3_acid0.06/epoch-0125.ckpt"))
 PROTEINMPNN_CKPT = os.environ.get("PROTEINMPNN_CKPT", "/novo/projects/departments/rdd/cpjb/foundry/model_ckpts/proteinmpnn_v_48_020.pt")
-OUT_DIR = _P / "benchmarks/results" / os.environ.get("EV6_OUT_SUBDIR", "")
+# Results go to benchmarks/results/<EV6_OUT_SUBDIR>/, by default the shipped checkpoint's folder, so a plain
+# run overwrites the tracked results. Set EV6_OUT_SUBDIR (with POTTS_CKPT) to benchmark another model.
+OUT_DIR = _P / "benchmarks/results" / os.environ.get("EV6_OUT_SUBDIR", "his0.3_acid0.06")
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 DATASETS = {
     "fireprot":  (_P / "benchmarks/data/energy_benchmark_datasets/fireprot_test_subset.csv",
