@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 # EV6_OUT_SUBDIR selects WHICH benchmarked model to plot; the figure is written with a matching suffix
 # so each model gets its own file. Unset = the shipped checkpoint (his0.3_acid0.06), the same default as
 # stability_benchmark.py, so a plain run reads and overwrites the tracked results.
-import os
+import os, sys
 BASE = Path(os.environ.get("PROTON_ROOT", Path(__file__).resolve().parents[1])) / "benchmarks/results"
 SUBDIR = os.environ.get("EV6_OUT_SUBDIR", "his0.3_acid0.06")
 OUT = BASE / SUBDIR
@@ -30,10 +30,17 @@ REC, MEGA, FIRE = OUT / "val_recovery_all.csv", OUT / "stability_megascale_summa
 MODELS = [("ProteinMPNN", "#828080"), ("PottsMPNN — MPNN head", "#4153A4"), ("PottsMPNN — Potts head", "#189486")]
 
 
-def stab(path, col):
-    return float(pd.read_csv(path, index_col=0).loc[col, "abs_pearson"]) if path.exists() else np.nan
+# A missing input used to leave its bars out of the figure without a word; now it stops the plot instead.
+_missing = [p for p in (REC, MEGA, FIRE) if not p.exists()]
+if _missing:
+    sys.exit("missing benchmark results (run val_recovery_benchmark.py and stability_benchmark.py first):\n  "
+             + "\n  ".join(map(str, _missing)))
 
-d = pd.read_csv(REC) if REC.exists() else None
+
+def stab(path, col):
+    return float(pd.read_csv(path, index_col=0).loc[col, "abs_pearson"])
+
+d = pd.read_csv(REC)
 n_rec = len(d) if d is not None else 0
 # each group: (label, [(model_idx, value), ...]) in the model order they should appear
 GROUPS = [

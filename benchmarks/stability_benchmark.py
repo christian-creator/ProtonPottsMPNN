@@ -100,10 +100,9 @@ def run_dataset(name, csv_path, pdb_dir, max_pdbs):
     ds_p = _mkds(pdb_ids, pdb_dir, potts_pipe)
     ds_m = _mkds(pdb_ids, pdb_dir, std_pipe)
 
+    summary_csv = OUT_DIR / f"stability_{name}_summary.csv"
+    # Every run recomputes from scratch (no rows are read back) and overwrites out_csv and summary_csv.
     rows, done = [], set()
-    if out_csv.exists():
-        prev = pd.read_csv(out_csv); rows = prev.to_dict("records")
-        done = set(prev.pdb.astype(str)); print(f"[{name}] resume: {len(done)} pdbs done", flush=True)
 
     for i, pid in enumerate(tqdm(pdb_ids, desc=name)):
         if str(pid) in done:
@@ -159,7 +158,7 @@ def run_dataset(name, csv_path, pdb_dir, max_pdbs):
     for col in ["potts_energy", "potts_decoder", "proteinmpnn"]:
         pr = pearsonr(D[col], D.ddg_expt); sr = spearmanr(D[col], D.ddg_expt)
         summ[col] = dict(pearson=pr[0], abs_pearson=abs(pr[0]), spearman=sr[0], abs_spearman=abs(sr[0]))
-    pd.DataFrame(summ).T.to_csv(OUT_DIR / f"stability_{name}_summary.csv")
+    pd.DataFrame(summ).T.to_csv(summary_csv)
     print(f"\n=== {name}: {len(D)} mutations, {D.pdb.nunique()} pdbs ===", flush=True)
     for col in ["potts_energy", "potts_decoder", "proteinmpnn"]:
         print(f"  {col:14s} |Pearson|={summ[col]['abs_pearson']:.3f}  |Spearman|={summ[col]['abs_spearman']:.3f}")
