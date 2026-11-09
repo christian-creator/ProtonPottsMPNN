@@ -98,14 +98,14 @@ class TestPolymerLigandInterface:
 
         # Polymer atoms 0, 1, 2 should be at interface (close to ligands)
         # Polymer atom 3 should NOT be at interface (far from ligands)
-        assert interface_flags[0] is True  # polymer atom close to ligand
-        assert interface_flags[1] is True  # polymer atom close to ligand
-        assert interface_flags[2] is True  # polymer atom close to ligand
-        assert interface_flags[3] is False  # polymer atom far from ligand
+        assert bool(interface_flags[0]) is True  # polymer atom close to ligand
+        assert bool(interface_flags[1]) is True  # polymer atom close to ligand
+        assert bool(interface_flags[2]) is True  # polymer atom close to ligand
+        assert bool(interface_flags[3]) is False  # polymer atom far from ligand
 
         # All ligand atoms should be at interface (close to polymers)
-        assert interface_flags[4] is True  # ligand atom close to polymers
-        assert interface_flags[5] is True  # ligand atom close to polymers
+        assert bool(interface_flags[4]) is True  # ligand atom close to polymers
+        assert bool(interface_flags[5]) is True  # ligand atom close to polymers
 
     def test_distance_threshold_sensitivity(self):
         """Test that distance threshold correctly affects interface detection."""
@@ -156,13 +156,13 @@ class TestPolymerLigandInterface:
         # (First polymer and first ligand have NaN coords)
         interface_flags = result.at_polymer_ligand_interface
 
-        assert interface_flags[0] is False  # polymer atom with NaN coords
+        assert bool(interface_flags[0]) is False  # polymer atom with NaN coords
         assert (
-            interface_flags[1] is True
+            bool(interface_flags[1]) is True
         )  # polymer atom with valid coords, close to valid ligand
-        assert interface_flags[2] is False  # ligand atom with NaN coords
+        assert bool(interface_flags[2]) is False  # ligand atom with NaN coords
         assert (
-            interface_flags[3] is True
+            bool(interface_flags[3]) is True
         )  # ligand atom with valid coords, close to valid polymer
 
     def test_no_polymer_atoms(self):
